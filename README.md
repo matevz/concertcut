@@ -1,4 +1,6 @@
-# Concert Cut
+<p align="center"><img src="logo.png" width="160" alt="Concert Cut logo"></p>
+
+<h1 align="center">Concert Cut</h1>
 
 Turns the recording of a concert — camera video, a separate field recorder (e.g. a Zoom
 H6) and the printed programme — into one file per piece:
