@@ -118,6 +118,24 @@ uv run concertcut --help
 uv run concertcut analyze --help
 ```
 
+### Metadata
+
+The tags written to the files come from `concertcut.json`. To change them, edit the file
+and run `concertcut` again — your values are kept on later runs:
+
+```json
+"concert": {
+  "album": "Bolečina in lepota",
+  "artist": "Komorni zbor De profundis Kranj",
+  "date": "2026-10-16",
+  "tags": {"genre": "Choral", "conductor": "Branka Potočnik Krajnik"}
+}
+```
+
+`album` is read from the first line of the programme, `artist` from a line naming the
+choir or ensemble, and `date` from the folder name (`20261016_…`). Anything under `tags` is
+written as is. Composer and title are set per piece (`pieces[].composer`, `pieces[].title`).
+
 ### The Kdenlive project
 
 Written for Kdenlive 26.04 (document version 1.1, works with 23.04+ in principle):

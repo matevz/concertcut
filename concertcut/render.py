@@ -73,6 +73,8 @@ def _metadata(config: Config, piece: Piece) -> list[str]:
         "track": str(piece.number),
         "date": c.get("date", ""),
     }
+    # extra tags added by hand in concertcut.json, e.g. "concert": {"tags": {"genre": "Choral"}}
+    tags.update({str(k): str(v) for k, v in (c.get("tags") or {}).items()})
     out = []
     for k, v in tags.items():
         if v:

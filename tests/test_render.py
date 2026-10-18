@@ -66,3 +66,13 @@ def test_all_flac_before_any_mp4(tmp_path, monkeypatch):
     config.path = None
     render.render(config, tmp_path / "out", jobs=4)
     assert order == [".flac"] * 3 + [".mp4"] * 3
+
+
+def test_extra_tags_from_the_config(tmp_path):
+    config = make_config(tmp_path)
+    config.concert.update(album="Bolečina in lepota", date="2026-10-16",
+                          tags={"genre": "Choral", "conductor": "Branka Potočnik Krajnik"})
+    cmd = render.flac_command(config, config.pieces[0], tmp_path / "x.flac")
+    meta = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-metadata"]
+    assert "album=Bolečina in lepota" in meta and "date=2026-10-16" in meta
+    assert "genre=Choral" in meta and "conductor=Branka Potočnik Krajnik" in meta

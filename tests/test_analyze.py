@@ -268,3 +268,16 @@ def test_kdenlive_preview_from_matching_question(fake):
     seen.clear()
     run(tmp, confirm_matching=preview_then_confirm)
     assert project.with_name(project.name + ".bak").exists()
+
+
+def test_hand_edited_concert_tags_are_kept(fake):
+    calls, tmp = fake
+    run(tmp)
+    d = json.loads((tmp / "concertcut.json").read_text())
+    d["concert"].update(album="Bolečina in lepota", date="2026-10-16", artist="Komorni zbor De profundis Kranj",
+                        conductor="Branka Potočnik Krajnik")
+    (tmp / "concertcut.json").write_text(json.dumps(d, ensure_ascii=False))
+    plan = run(tmp)
+    assert plan.concert["album"] == "Bolečina in lepota" and plan.concert["date"] == "2026-10-16"
+    assert plan.concert["conductor"] == "Branka Potočnik Krajnik"  # extra fields survive too
+    assert run(tmp, artist="Someone else").concert["artist"] == "Someone else"  # --artist still wins

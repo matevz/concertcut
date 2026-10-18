@@ -476,7 +476,11 @@ def analyze(concert_dir: str | Path, config_path: str | Path | None = None,
         changed = _signature(pr) != saved
         not_performed = sorted(set(skip or []) | set(prev.programme.get("not_performed", []) if prev else []))
         programme_info = {**(pr.to_dict() if pr else {}), "source": source, "not_performed": not_performed}
-        concert = _concert_info(concert_dir, pr, artist or (prev.concert.get("artist") if prev else None))
+        concert = _concert_info(concert_dir, pr, artist)
+        if prev:  # values in concertcut.json (e.g. edited by hand) win; only missing ones are filled in
+            concert.update({k: v for k, v in prev.concert.items() if v not in (None, "")})
+            if artist:
+                concert["artist"] = artist  # --artist given on the command line
         if matches is None:
             prev = _save_programme(config_path, prev, pr, programme_info, changed, concert)
         else:
