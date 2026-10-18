@@ -6,10 +6,10 @@ import opentimelineio as otio
 
 from concertcut import kdenlive, otio_export
 from concertcut.media import MediaFile
-from concertcut.plan import Piece, Plan, safe_filename
+from concertcut.config import Config, Piece, safe_filename
 
 
-def make_plan(tmp_path) -> Plan:
+def make_config(tmp_path) -> Config:
     cam = [MediaFile(f"/media/c/S00{i}.MP4", 1357.96, start=1357.96 * (i - 1), audio_index=1, video_index=0,
                      sample_rate=48000, channels=2, fps=Fraction(50), width=1920, height=1080)
            for i in (1, 2, 3)]
@@ -24,15 +24,15 @@ def make_plan(tmp_path) -> Plan:
         Piece(3, "Vitja Avsec", "Grofovo nasilje nad mlinarjem", 3700.0, 3800.0),
         Piece(4, "X", "disabled", 3900.0, 3950.0, enabled=False),
     ]
-    plan = Plan(concert={"name": "20261016_test", "dir": str(tmp_path)}, video=cam, audio=rec,
+    config = Config(concert={"name": "20261016_test", "dir": str(tmp_path)}, video=cam, audio=rec,
                 audio_start=40.0, pieces=pieces, path=tmp_path / "p.json")
-    plan.settings.gain_db = 25.0
-    return plan
+    config.settings.gain_db = 25.0
+    return config
 
 
 def test_kdenlive_structure(tmp_path):
-    plan = make_plan(tmp_path)
-    path = kdenlive.write(plan, tmp_path / "x.kdenlive")
+    config = make_config(tmp_path)
+    path = kdenlive.write(config, tmp_path / "x.kdenlive")
     root = ET.parse(path).getroot()
     assert root.tag == "mlt" and root.get("producer") == "main_bin"
     ids = [e.get("id") for e in root if e.get("id")]
@@ -76,19 +76,19 @@ def test_kdenlive_structure(tmp_path):
 
 
 def test_otio(tmp_path):
-    plan = make_plan(tmp_path)
-    path = otio_export.write(plan, tmp_path / "x.otio")
+    config = make_config(tmp_path)
+    path = otio_export.write(config, tmp_path / "x.otio")
     tl = otio.adapters.read_from_file(str(path))
-    assert [m.name.split(" [")[0] for m in tl.tracks.markers] == [p.basename for p in plan.enabled_pieces()]
+    assert [m.name.split(" [")[0] for m in tl.tracks.markers] == [p.basename for p in config.enabled_pieces()]
     kinds = [t.kind for t in tl.tracks]
     assert kinds.count("Audio") == 2 and kinds.count("Video") == 1
 
 
-def test_plan_roundtrip(tmp_path):
-    plan = make_plan(tmp_path)
-    plan.save()
-    again = Plan.load(plan.path)
-    assert again.to_dict() == plan.to_dict()
+def test_config_roundtrip(tmp_path):
+    config = make_config(tmp_path)
+    config.save()
+    again = Config.load(config.path)
+    assert again.to_dict() == config.to_dict()
     assert again.fps == Fraction(50)
 
 
@@ -99,11 +99,11 @@ def test_safe_filename():
 
 def test_recorder_started_before_camera(tmp_path):
     """A piece beginning 30 s before the camera was switched on: project shifted, no negative times."""
-    plan = make_plan(tmp_path)
-    plan.audio_start = -100.0  # recorder ran 100 s before the camera
-    plan.pieces[0].start, plan.pieces[0].end = -30.0, 200.0
-    assert plan.project_shift == 30.0
-    root = ET.parse(kdenlive.write(plan, tmp_path / "early.kdenlive")).getroot()
+    config = make_config(tmp_path)
+    config.audio_start = -100.0  # recorder ran 100 s before the camera
+    config.pieces[0].start, config.pieces[0].end = -30.0, 200.0
+    assert config.project_shift == 30.0
+    root = ET.parse(kdenlive.write(config, tmp_path / "early.kdenlive")).getroot()
     seq = [t for t in root.findall("tractor") if t.get("id", "").startswith("{")][0]
     guides = json.loads({p.get("name"): p.text for p in seq.findall("property")}
                         ["kdenlive:sequenceproperties.guides"])
@@ -112,14 +112,14 @@ def test_recorder_started_before_camera(tmp_path):
     assert rec[1].tag == "entry" and rec[1].get("in") == "00:01:10.000"  # recorder cropped to 70 s
     cam = root.find("playlist[@id='playlist4']")
     assert cam[0].tag == "blank" and cam[0].get("length") == "00:00:30.000"
-    tl = otio.adapters.read_from_file(str(otio_export.write(plan, tmp_path / "early.otio")))
+    tl = otio.adapters.read_from_file(str(otio_export.write(config, tmp_path / "early.otio")))
     assert tl.tracks.markers[0].marked_range.start_time.value == 0
 
 
 def test_volume_filter_in_out_match_clip(tmp_path):
-    plan = make_plan(tmp_path)
-    plan.audio_start = -600.0  # recorder ran 10 min before the camera: first clip is trimmed
-    root = ET.parse(kdenlive.write(plan, tmp_path / "trim.kdenlive")).getroot()
+    config = make_config(tmp_path)
+    config.audio_start = -600.0  # recorder ran 10 min before the camera: first clip is trimmed
+    root = ET.parse(kdenlive.write(config, tmp_path / "trim.kdenlive")).getroot()
     for e in root.find("playlist[@id='playlist0']").findall("entry"):
         f = e.find("filter")
         assert (f.get("in"), f.get("out")) == (e.get("in"), e.get("out"))
@@ -127,31 +127,31 @@ def test_volume_filter_in_out_match_clip(tmp_path):
 
 
 def test_audio_only_project(tmp_path):
-    plan = make_plan(tmp_path)
-    plan.video = []
-    plan.audio_start = 0.0
-    root = ET.parse(kdenlive.write(plan, tmp_path / "audio.kdenlive")).getroot()
+    config = make_config(tmp_path)
+    config.video = []
+    config.audio_start = 0.0
+    root = ET.parse(kdenlive.write(config, tmp_path / "audio.kdenlive")).getroot()
     assert root.find("profile").get("frame_rate_num") == "25"  # no camera: default profile
     assert len(root.find("playlist[@id='playlist0']").findall("entry")) == 2  # both recorder files
     assert not root.find("playlist[@id='playlist4']").findall("entry")  # no video
     assert len(root.find("playlist[@id='main_bin']").findall("entry")) == 1 + 2
-    tl = otio.adapters.read_from_file(str(otio_export.write(plan, tmp_path / "audio.otio")))
+    tl = otio.adapters.read_from_file(str(otio_export.write(config, tmp_path / "audio.otio")))
     assert [t.name for t in tl.tracks] == ["Recorder"]
 
 
 def test_camera_sound_as_recording_project(tmp_path):
     from dataclasses import replace
 
-    plan = make_plan(tmp_path)
-    plan.audio = [replace(f) for f in plan.video]  # no recorder: the camera's own sound
-    plan.audio_start = 0.0
-    assert plan.camera_is_recorder
-    root = ET.parse(kdenlive.write(plan, tmp_path / "cam.kdenlive")).getroot()
+    config = make_config(tmp_path)
+    config.audio = [replace(f) for f in config.video]  # no recorder: the camera's own sound
+    config.audio_start = 0.0
+    assert config.camera_is_recorder
+    root = ET.parse(kdenlive.write(config, tmp_path / "cam.kdenlive")).getroot()
     chains = {c.get("id"): {p.get("name"): p.text for p in c.findall("property")} for c in root.findall("chain")}
     rec = root.find("playlist[@id='playlist0']").findall("entry")
-    assert [chains[e.get("producer")]["resource"] for e in rec] == [f.path for f in plan.video]
+    assert [chains[e.get("producer")]["resource"] for e in rec] == [f.path for f in config.video]
     assert {chains[e.get("producer")]["set.test_audio"] for e in rec} == {"0"}  # audible, with volume
     assert not root.find("playlist[@id='playlist2']").findall("entry")  # no muted duplicate
     assert len(root.find("playlist[@id='main_bin']").findall("entry")) == 1 + 3  # each file once
-    tl = otio.adapters.read_from_file(str(otio_export.write(plan, tmp_path / "cam.otio")))
+    tl = otio.adapters.read_from_file(str(otio_export.write(config, tmp_path / "cam.otio")))
     assert [t.name for t in tl.tracks] == ["Camera sound", "Camera"]

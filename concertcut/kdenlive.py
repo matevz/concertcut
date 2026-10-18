@@ -1,4 +1,4 @@
-"""Kdenlive project (document version 1.1, Kdenlive 23.04+ with sequences) from a plan.
+"""Kdenlive project (document version 1.1, Kdenlive 23.04+ with sequences) from a config.
 
 Track layout (bottom to top, like a typical concert project):
   audio: recorder, whole files at one sync offset, volume filter at the concert gain
@@ -11,7 +11,9 @@ Guides "NN Composer - Title" / "NN end" mark every piece for render-by-guides.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import shutil
 import time
 import uuid as uuidlib
 import xml.etree.ElementTree as ET
@@ -20,7 +22,9 @@ from pathlib import Path
 
 from . import media
 from .media import MediaFile
-from .plan import Plan
+from .config import Config
+
+log = logging.getLogger(__name__)
 
 KDENLIVE_VERSION = "26.04.2"
 MLT_VERSION = "7.39.0"
@@ -72,20 +76,20 @@ def _uuid() -> str:
     return "{" + str(uuidlib.uuid4()) + "}"
 
 
-def build(plan: Plan) -> ET.ElementTree:
-    fps = plan.fps
+def build(config: Config) -> ET.ElementTree:
+    fps = config.fps
     doc = _Doc(fps)
-    v0 = next((f for f in plan.video if f.video_index >= 0), None)
+    v0 = next((f for f in config.video if f.video_index >= 0), None)
     width, height = (v0.width, v0.height) if v0 else (1920, 1080)
     sar = v0.sar if v0 else Fraction(1)
     dar = Fraction(width, height) * sar
     seq_uuid = _uuid()
 
     # ---- timeline content ---------------------------------------------------------
-    shift = plan.project_shift
+    shift = config.project_shift
     cam_entries = []  # (file, timeline_frame, length_frames)
     cursor = 0
-    for f in sorted(plan.video, key=lambda f: f.start):
+    for f in sorted(config.video, key=lambda f: f.start):
         pos = max(cursor, doc.frames(f.start + shift))
         length = max(1, doc.frames(f.duration))
         cam_entries.append((f, pos, length))
@@ -94,26 +98,26 @@ def build(plan: Plan) -> ET.ElementTree:
     # Continuous recorder track, like a hand-made project: whole files at one sync
     # offset, each with a volume filter at the constant concert gain.
     guides = []
-    for p in plan.enabled_pieces():
+    for p in config.enabled_pieces():
         guides.append({"comment": p.basename, "duration": 0, "pos": doc.frames(p.start + shift), "type": 0})
         guides.append({"comment": f"{p.number:02d} end", "duration": 0, "pos": doc.frames(p.end + shift),
                        "type": 0})
     zoom_entries = []  # (file, timeline_frame, in_frame, length_frames, level, gain)
     cursor = 0
-    for f, pos_s, in_s, dur_s in plan.recorder_layout():
+    for f, pos_s, in_s, dur_s in config.recorder_layout():
         pos, in_f, n = doc.frames(pos_s), doc.frames(in_s), doc.frames(dur_s)
         skip = max(0, cursor - pos)  # never overlap the previous file
         pos, in_f, n = pos + skip, in_f + skip, n - skip
         if n <= 0:
             continue
-        level = f"{doc.tc(in_f)}={plan.gain_db:.2f}"  # constant, like a hand-made project
-        zoom_entries.append((f, pos, in_f, n, level, plan.gain_db))
+        level = f"{doc.tc(in_f)}={config.gain_db:.2f}"  # constant, like a hand-made project
+        zoom_entries.append((f, pos, in_f, n, level, config.gain_db))
         cursor = pos + n
     total = max([pos + n for _, pos, n in cam_entries] + [e[1] + e[3] for e in zoom_entries] + [1])
 
     # ---- document ---------------------------------------------------------------------
     root = ET.Element("mlt", {"LC_NUMERIC": "C", "producer": "main_bin",
-                              "root": str(plan.concert_dir), "version": MLT_VERSION})
+                              "root": str(config.concert_dir), "version": MLT_VERSION})
     ET.SubElement(root, "profile", {
         "colorspace": "709" if height >= 720 else "601",
         "description": f"{width}x{height} {float(fps):g} fps",
@@ -131,7 +135,7 @@ def build(plan: Plan) -> ET.ElementTree:
 
     # bin clip ids: 2 = sequence folder, 3 = sequence, 4.. = source files
     sources: list[MediaFile] = []
-    for f in list(plan.video) + list(plan.audio):  # each file once in the bin
+    for f in list(config.video) + list(config.audio):  # each file once in the bin
         if f.path not in {x.path for x in sources}:
             sources.append(f)
     clip_id = {f.path: 4 + i for i, f in enumerate(sources)}
@@ -205,12 +209,12 @@ def build(plan: Plan) -> ET.ElementTree:
         return tr.get("id")
 
     # recorder track
-    zoom_chains = {id(f): track_chain(f, True) for f in plan.audio
+    zoom_chains = {id(f): track_chain(f, True) for f in config.audio
                    if any(e[0] is f for e in zoom_entries)}
     t_zoom = track(zoom_entries, True, "video", zoom_chains, gain_filters=True)
     # camera sound (muted)
     # camera sound for reference - unless it already is the recording (no separate recorder)
-    cam_with_audio = [] if plan.camera_is_recorder else \
+    cam_with_audio = [] if config.camera_is_recorder else \
         [(f, pos, 0, n) for f, pos, n in cam_entries if f.audio_index >= 0]
     cam_a_chains = {id(f): track_chain(f, True) for f, *_ in cam_with_audio}
     t_cam_a = track(cam_with_audio, True, "both", cam_a_chains)
@@ -295,8 +299,26 @@ def build(plan: Plan) -> ET.ElementTree:
     return ET.ElementTree(root)
 
 
-def write(plan: Plan, path: str | Path) -> Path:
+def default_path(config: Config) -> Path:
+    return config.concert_dir / f"{config.concert['name']}.concertcut.kdenlive"
+
+
+def write_project(config: Config, path: str | Path | None = None) -> tuple[Path, Path]:
+    """Write the Kdenlive project and the same timeline as .otio; an existing project is
+    kept as .bak (it may contain changes made in Kdenlive)."""
+    from . import otio_export
+
+    path = Path(path) if path else default_path(config)
+    if path.exists():
+        backup = path.with_name(path.name + ".bak")
+        shutil.copy2(path, backup)
+        log.info("previous project kept as %s", backup)
+    write(config, path)
+    return path, otio_export.write(config, path.with_suffix(".otio"))
+
+
+def write(config: Config, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    build(plan).write(path, encoding="utf-8", xml_declaration=True)
+    build(config).write(path, encoding="utf-8", xml_declaration=True)
     return path

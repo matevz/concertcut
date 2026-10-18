@@ -141,3 +141,24 @@ def test_parse_entered_rejects_duplicates_and_empty():
         prog.parse_entered(["1 A - X", "1 B - Y"])
     with pytest.raises(prog.ProgrammeError):
         prog.parse_entered(["", "  "])
+
+
+def test_mac_decomposed_text_gives_composed_names():
+    import unicodedata
+
+    from concertcut.config import Piece
+
+    text = unicodedata.normalize("NFD", "PROGRAM\nUršula Jašovec (1986):\nIVAN, MOJ SIN, PA KOD SI HODO TI?\n"
+                                        "Tri žene iztrgajo mladeniču srce\n")
+    pr = prog.parse_text(text)
+    it = pr.items[0]
+    assert it.composer == "Uršula Jašovec" and it.title == "Tri žene iztrgajo mladeniču srce"
+    assert unicodedata.is_normalized("NFC", it.composer + it.title)
+    typed = prog.parse_entered([unicodedata.normalize("NFD", "01 Matej Kastelic - Štalar pometa štalico")])
+    assert typed.items[0].title == "Štalar pometa štalico"
+    nfd_piece = Piece(1, unicodedata.normalize("NFD", "Jašovec"), "x", 0, 1)  # e.g. edited in the config on a Mac
+    assert nfd_piece.basename == "01 Jašovec - x"
+
+
+def test_pdf_quirks_cleaned():
+    assert prog.clean_text("Pri\u00adredba \ufb01nale\u00a0iz\u200b") == "Priredba finale iz"

@@ -1,4 +1,4 @@
-"""The editable plan file (``concertcut.json``) shared by all pipeline steps.
+"""The editable config file (``concertcut.json``) shared by all pipeline steps.
 
 All times are on the *timeline*: 0 = first frame of the first camera file, with the
 camera files at their recorded positions. The Zoom/recorder stream time ``z`` for a
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -20,8 +21,19 @@ VERSION = 1
 _BAD_CHARS = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
 
 
+CD_RATE, CD_BITS = 44100, 16
+
+
+def flac_rate(audio: list[MediaFile], override: int | None = None) -> int:
+    """FLAC sample rate: CD quality (44.1 kHz) unless the recording's rate is lower."""
+    if override:
+        return override
+    src = audio[0].sample_rate if audio else CD_RATE
+    return min(src, CD_RATE) if src else CD_RATE
+
+
 def safe_filename(s: str) -> str:
-    s = _BAD_CHARS.sub("", s)
+    s = unicodedata.normalize("NFC", _BAD_CHARS.sub("", s))  # composed č, š, ž (see programme.clean_text)
     return re.sub(r"\s+", " ", s).strip(" .")
 
 
@@ -36,8 +48,8 @@ class Settings:
     mp4_peak_dbfs: float | None = None  # None = same as peak_dbfs
     fade_in_s: float = 0.0
     fade_out_s: float = 0.0
-    flac_sample_rate: int | None = None  # None = keep source rate
-    x264_crf: int = 18
+    flac_sample_rate: int | None = None  # None = CD quality (44.1 kHz) or the source rate if lower
+    x264_crf: int = 22  # matches the quality of a Kdenlive render (CRF 23, faster preset)
     x264_preset: str = "slow"
     aac_bitrate: str = "320k"
 
@@ -128,7 +140,7 @@ def _file_from_dict(d: dict) -> MediaFile:
 
 
 @dataclass
-class Plan:
+class Config:
     concert: dict
     video: list[MediaFile]
     audio: list[MediaFile]
@@ -141,6 +153,10 @@ class Plan:
     path: Path | None = None
 
     # -- geometry --------------------------------------------------------------------
+    @property
+    def flac_rate(self) -> int:
+        return flac_rate(self.audio, self.settings.flac_sample_rate)
+
     @property
     def camera_is_recorder(self) -> bool:
         """No separate recorder: the camera's own sound is the recording."""
@@ -226,11 +242,11 @@ class Plan:
         return path
 
     @classmethod
-    def load(cls, path: str | Path) -> "Plan":
+    def load(cls, path: str | Path) -> "Config":
         path = Path(path)
         d = json.loads(path.read_text(encoding="utf-8"))
         if d.get("version") != VERSION:
-            raise ValueError(f"{path}: unsupported plan version {d.get('version')}")
+            raise ValueError(f"{path}: unsupported config version {d.get('version')}")
         sync = dict(d.get("sync", {}))
         audio_start = to_seconds(sync.pop("audio_start", 0.0))
         return cls(

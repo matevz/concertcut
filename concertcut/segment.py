@@ -46,6 +46,10 @@ class SegmentParams:
     tail_margin_s: float = 0.5
     max_tail_s: float = 6.0
     separator_search_s: float = 60.0  # how far after the music to look for applause
+    # the first, isolated claps before the full applause (also cut off)
+    clap_db: float = 12.0  # above the hall's quiet level
+    clap_rise_db: float = 8.0  # within 30 ms
+    clap_gap_s: float = 1.0  # claps closer than this belong to the same applause
 
 
 @dataclass
@@ -56,6 +60,7 @@ class Region:
     start_reason: str = ""
     end_reason: str = ""
     encore: bool = False
+    first_note: float | None = None  # the first sung/played note; start = first_note - lead-in
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -298,6 +303,34 @@ def find_regions(lab: np.ndarray, music: np.ndarray, p: SegmentParams,
             cue_before)
 
 
+def first_clap(hf: np.ndarray, bulk: int, lo: int, fps: int, p: SegmentParams) -> int:
+    """Walk back from the onset of the full applause through the isolated claps that
+    lead into it (a few people always start first). Returns the frame of the first clap.
+
+    A clap is a sharp rise (>= clap_rise_db within 30 ms) to well above the hall's quiet
+    level (>= clap_db above it); claps belong together when less than clap_gap_s apart.
+    """
+    lo = max(0, lo)
+    if bulk - lo < 2:
+        return bulk
+    floor = float(np.percentile(hf[lo:bulk], 20))
+    d = max(1, int(0.03 * fps))
+    first, gap = bulk, int(p.clap_gap_s * fps)
+    while True:
+        a = max(lo + d, first - gap)
+        seg = np.arange(a, first)
+        if len(seg) == 0:
+            return first
+        sharp = (hf[seg] - hf[seg - d] >= p.clap_rise_db) & (hf[seg] >= floor + p.clap_db)
+        hits = seg[sharp]
+        if not len(hits):
+            return first
+        k = int(hits[0])
+        while k - 1 > lo and hf[k - 1] > hf[k - 1 - d] + p.clap_rise_db / 2:
+            k -= 1  # to the start of that clap's rise
+        first = k
+
+
 def _smooth(x: np.ndarray, n: int) -> np.ndarray:
     return uniform_filter1d(x, size=max(1, n), mode="nearest")
 
@@ -308,6 +341,7 @@ def refine(regions: list[tuple[int, int]], lab: np.ndarray, music: np.ndarray,
     """Exact edges in seconds using the energy envelopes (both at ``env_fps``)."""
     e = _smooth(energy_db, int(0.05 * env_fps))
     hf = _smooth(hf_db, int(0.03 * env_fps))
+    hf_raw = np.asarray(hf_db, dtype=float)
     n_env = len(e)
 
     def idx(t: float) -> int:
@@ -364,8 +398,8 @@ def refine(regions: list[tuple[int, int]], lab: np.ndarray, music: np.ndarray,
             start_i = j
             j -= 1
         r.start = max(limit, start_i / env_fps)
-        r.start_reason = (("after pitch cue, " if cue else "")
-                          + f"first note {s0 - onset:.1f} s before detector, {onset - r.start:.1f} s lead-in")
+        r.first_note = onset
+        r.start_reason = ("after pitch cue, " if cue else "") + "first note"
         # --- end: where the audience starts to clap. Without applause before the next
         # piece: just before the next pitch cue or speech; otherwise the end of the reverb.
         nxt_a = regions[k + 1][0] if k + 1 < len(regions) else len(lab)
@@ -386,7 +420,8 @@ def refine(regions: list[tuple[int, int]], lab: np.ndarray, music: np.ndarray,
             step = max(1, int(0.1 * env_fps))
             if kind == "applause" and j1 - j0 > step:
                 rise = hf[j0 + step:j1] - hf[j0:j1 - step]
-                st = (j0 + int(np.argmax(rise))) / env_fps
+                bulk = j0 + int(np.argmax(rise))
+                st = first_clap(hf_raw, bulk, idx(max(s0, e0 - 1.0)), env_fps, p) / env_fps
             end, r.end_reason = st - 0.05, kind
         elif nxt_a < len(lab):
             end, r.end_reason = nxt_a / RATE - 0.5, "next piece"

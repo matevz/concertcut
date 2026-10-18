@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -100,6 +101,25 @@ class Programme:
 
 # ----------------------------------------------------------------------------- text
 
+_LIGATURES = {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl",
+              "\ufb05": "st", "\ufb06": "st"}
+_INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"))  # soft hyphen, zero-width
+
+
+def clean_text(s: str) -> str:
+    """Normalise text from PDFs, files and the keyboard, wherever it was made.
+
+    macOS often writes letters like č, š, ž decomposed (c + combining caron, Unicode NFD);
+    Linux and Windows use the composed form (NFC). They look the same but are different
+    bytes, so file names would differ. Also: PDF ligatures (ﬁ -> fi), soft hyphens and
+    zero-width characters are removed, non-breaking spaces become spaces.
+    """
+    for lig, rep in _LIGATURES.items():
+        s = s.replace(lig, rep)
+    s = s.translate(_INVISIBLE).replace("\u00a0", " ").replace("\u202f", " ")
+    return unicodedata.normalize("NFC", s)
+
+
 
 def letters(s: str) -> list[str]:
     return [c for c in s if c.isalpha()]
@@ -166,6 +186,7 @@ class ProgrammeError(ValueError):
 
 
 def parse_text(text: str, source: str = "") -> Programme:
+    text = clean_text(text)
     raw = _split_columns(text.replace("\f", "\n").splitlines())
     start = next((i for i, l in enumerate(raw) if SECTION_RE.match(l)), None)
     header = raw[:start] if start is not None else []
@@ -251,6 +272,7 @@ def parse_entered(lines: list[str]) -> Programme:
     """
     items: list[ProgrammeItem] = []
     for line in lines:
+        line = clean_text(line)
         if not line.strip():
             continue
         m = ENTERED_RE.match(line)
@@ -275,7 +297,7 @@ def load(path: str | Path) -> Programme:
     if p.suffix.lower() == ".pdf":
         return parse_text(pdf_to_text(p), source=str(p))
     if p.suffix.lower() == ".json":
-        d = json.loads(p.read_text(encoding="utf-8"))
+        d = json.loads(clean_text(p.read_text(encoding="utf-8")))
         rows = d["items"] if isinstance(d, dict) else d
         items = [ProgrammeItem.from_dict({"number": n, **r}) for n, r in enumerate(rows, 1)]
         return Programme(items=items, source=str(p),

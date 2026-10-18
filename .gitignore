@@ -1,0 +1,21 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Local data: detector weights, test runs, design notes from development
+models/
+work/
+plans/
+
+# Files concertcut writes next to the media, in case it is run inside the repository
+concertcut.json
+concertcut.cache.npz
+*.part.*
+render/
+*.concertcut.kdenlive
+*.concertcut.otio

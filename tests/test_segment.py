@@ -164,3 +164,15 @@ def test_start_not_in_applause_tail():
     energy[20 * FPS:22 * FPS] = -30.0  # applause dying away, no longer recognised as applause
     regions, _, _ = segment.segment(scores, energy, hf, FPS, len(energy) / FPS)
     assert regions[0].start >= 21.5, regions[0]
+
+
+def test_end_before_first_isolated_claps():
+    scores, energy, hf = build([("silence", 10), ("music", 60), ("silence", 3), ("applause", 10), ("silence", 5)])
+    # two people clap first, at 72.0 s and 72.6 s; the full applause starts at 73.0 s
+    for t in (72.0, 72.6):
+        i = int(t * FPS)
+        hf[i:i + 4] = -40.0
+        energy[i:i + 4] = -35.0
+    regions, _, _ = segment.segment(scores, energy, hf, FPS, len(energy) / FPS)
+    assert regions[0].end_reason == "applause"
+    assert 71.8 < regions[0].end < 72.0, regions[0].end

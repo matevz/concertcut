@@ -11,8 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import programme as prog
-from .analyze import Match, RereadMedia, RereadProgramme
-from .timecode import to_tc
+from .analyze import BackToProgramme, Match, PreviewKdenlive, RereadMedia, RereadProgramme, concert_gain
 
 
 class Aborted(SystemExit):
@@ -28,10 +27,6 @@ def _ask(prompt: str, input_fn=input) -> str:
 
 def _numbers(text: str) -> list[int]:
     return [int(x) for x in text.replace(",", " ").split()]
-
-
-def _tc(t: float) -> str:
-    return to_tc(t)[:-2]  # HH:MM:SS.s
 
 
 def _dur(t: float) -> str:
@@ -59,10 +54,32 @@ def enter_programme(reason: str, input_fn=input, out=print) -> prog.Programme | 
             out(f"  {e} - please type the list again")
 
 
+def numbering_notes(numbers: list[int]) -> list[str]:
+    """What is unusual about programme numbers that are not simply 1, 2, 3, ..."""
+    notes = []
+    dupes = sorted({n for n in numbers if numbers.count(n) > 1})
+    if dupes:
+        notes.append("used more than once: " + ", ".join(map(str, dupes)))
+    present = set(numbers)
+    missing = [n for n in range(1, max(numbers, default=0) + 1) if n not in present]
+    if missing:
+        notes.append("missing: " + ", ".join(map(str, missing)) + " (not performed?)")
+    swaps = [f"{a} before {b}" for a, b in zip(numbers, numbers[1:]) if a > b]
+    if swaps:
+        notes.append("not in order: " + ", ".join(swaps))
+    return notes
+
+
 def show_programme(pr: prog.Programme, out=print) -> None:
     out(f"\nProgramme{' - ' + pr.concert_title if pr.concert_title else ''}:")
     for it in pr.items:
         out(f"  {it.number:2d}. {it.composer_or_folk} - {it.title}")
+    notes = numbering_notes([it.number for it in pr.items])
+    if notes:
+        out("")
+        out("  WARNING: the numbering is not 1, 2, 3, ... - " + "; ".join(notes) + ".")
+        out("  Tracks are numbered in the order performed; check that this is right.")
+        out("")
 
 
 def _edit_programme(pr: prog.Programme, editor: str | None = None) -> prog.Programme:
@@ -78,7 +95,7 @@ def _edit_programme(pr: prog.Programme, editor: str | None = None) -> prog.Progr
         subprocess.run(cmd + [str(path)], check=False)
         items = []
         by_no = {it.number: it for it in pr.items}
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in prog.clean_text(path.read_text(encoding="utf-8")).splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             parts = [x.strip() for x in line.split("|")]
@@ -138,21 +155,60 @@ def confirm_programme(pr: prog.Programme, input_fn=input, out=print) -> prog.Pro
             out("  ?")
 
 
+def _clock(t: float) -> str:
+    """Position in a file: M:SS.s, or H:MM:SS.s from one hour on."""
+    tenths = int(round(t * 10))
+    h, rest = divmod(tenths, 36000)
+    m, rest = divmod(rest, 600)
+    sec = rest / 10
+    return f"{h}:{m:02d}:{sec:04.1f}" if h else f"{m}:{sec:04.1f}"
+
+
+def _span_text(spans: list[dict]) -> str:
+    if not spans:
+        return "-"
+    first, last = spans[0], spans[-1]
+    if len(spans) == 1:
+        return f"{first['file']}  {_clock(first['from'])} - {_clock(first['to'])}"
+    return f"{first['file']} {_clock(first['from'])} - {last['file']} {_clock(last['to'])}"
+
+
 def show_matching(matches: list[Match], pr: prog.Programme | None, out=print) -> None:
-    out("\nDetected pieces (timeline):")
-    out(f"  {'#':>2}  {'start':>10}  {'end':>10}  {'len':>5}  {'ends at':<10}  piece")
+    stale = sum(1 for m in matches if m.sources and m._peak_key is None)
+    if stale:
+        out(f"\nmeasuring the peaks of {stale} piece(s)...")
+    gain, loudest, by_user = concert_gain(matches)
+    out("\nDetected pieces (positions in the source files):")
+    out(f"  {'#':>2}  {'len':>5}  {'lead-in':>7}  {'peak':>9}  {'ends at':<10}  piece")
     for k, m in enumerate(matches, 1):
         r = m.region
         name = (f"[{m.item.number:2d}] {m.composer} - {m.title}" if m.item else
                 f"[ +] {m.title} (not in programme)")
-        cue = " (after pitch)" if "pitch cue" in r.start_reason else ""
-        out(f"  {k:2d}  {_tc(m.start):>10}  {_tc(m.end):>10}  {_dur(m.end - m.start):>5}  "
-            f"{r.end_reason:<10}  {name}{cue}")
+        lead = "-" if m.lead_in is None else f"{m.lead_in:.1f} s"
+        pk = m.peak() if m.sources else None
+        peak = "-" if pk is None else f"{pk:.1f} dB" + ("*" if m is loudest else " ")
+        out(f"  {k:2d}  {_dur(m.end - m.start):>5}  {lead:>7}  {peak:>9}  {r.end_reason:<10}  {name}")
+        for kind, spans in m.spans().items():
+            out(f"  {'':2}  {'':5}  {'':7}  {'':9}  {kind:<10}  {_span_text(spans)}")
     if pr:
         used = {m.item.number for m in matches if m.item}
         missing = [it for it in pr.items if it.number not in used]
         for it in missing:
             out(f"  not matched: [{it.number:2d}] {it.composer_or_folk} - {it.title}")
+    if gain is not None:
+        k = matches.index(loudest) + 1 if loudest else None
+        if by_user:
+            out(f"\n  Concert gain: {gain:+.2f} dB (set by you; 'g auto' for automatic)")
+            clipping = [str(i) for i, m in enumerate(matches, 1)
+                        if m.enabled and m.peak() is not None and m.peak() + gain > 0.0]
+            if clipping:
+                out("")
+                out(f"  WARNING: with this gain, piece(s) {', '.join(clipping)} will clip.")
+                out("")
+        else:
+            target = loudest.sources.target_dbfs
+            out(f"\n  Concert gain: {gain:+.2f} dB (automatic: the loudest piece, {k}*, peaks at "
+                f"{target:.1f} dBFS)")
 
 
 def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=input,
@@ -161,13 +217,18 @@ def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=i
     while True:
         show_matching(matches, pr, out)
         a = _ask("Is this matching correct? [Y]es / [m]erge segments / [d]rop segment / "
-                 "[a]ssign pieces / [r]e-read the video and audio files / [q]uit: ", input_fn).lower()
+                 "[a]ssign pieces / [l]ead-in / [g]ain / [k]denlive project / [b]ack to the programme / "
+                 "[r]e-read the video and audio files / [q]uit: ", input_fn).lower()
         if a in ("", "y", "yes"):
             return matches
         if a.startswith("q"):
             raise Aborted("aborted")
         if a in ("r", "re-read", "reread"):
             raise RereadMedia()
+        if a in ("b", "back"):
+            raise BackToProgramme()
+        if a in ("k", "kdenlive"):
+            raise PreviewKdenlive()
         try:
             if a.startswith("m"):
                 rest = a[1:].strip() or _ask("Merge which two adjacent segments (e.g. 6 7): ", input_fn)
@@ -186,6 +247,40 @@ def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=i
                     out("  no such segment")
                     continue
                 del matches[i - 1]
+            elif a.startswith("g"):
+                rest = a[1:].strip() or _ask("Concert gain in dB (e.g. 8 or 6.5), or 'auto': ", input_fn)
+                smaps = {id(m.sources): m.sources for m in matches if m.sources}
+                if not smaps:
+                    out("  no recording to measure")
+                    continue
+                value = None if rest in ("auto", "a") else float(rest.replace("db", "").strip())
+                for smap in smaps.values():
+                    smap.gain_db = value
+            elif a.startswith("l"):
+                rest = a[1:].strip() or _ask("Lead-in before the first note: segment and seconds "
+                                             "(e.g. 3 2.5; * 3 for all): ", input_fn)
+                parts = rest.replace(",", " ").split()
+                if len(parts) != 2:
+                    out("  give a segment number (or *) and seconds")
+                    continue
+                secs = float(parts[1])
+                if secs < 0:
+                    out("  the lead-in cannot be negative")
+                    continue
+                targets = range(len(matches)) if parts[0] == "*" else [int(parts[0]) - 1]
+                for i in targets:
+                    if not 0 <= i < len(matches):
+                        raise ValueError("no such segment")
+                    m = matches[i]
+                    if m.first_note is None:
+                        out(f"  segment {i + 1}: the first note is not known, edit start in concertcut.json")
+                        continue
+                    start = m.first_note - secs
+                    if i > 0 and start < matches[i - 1].end:
+                        start = matches[i - 1].end
+                        out(f"  segment {i + 1}: lead-in limited to {m.first_note - start:.1f} s "
+                            "(the previous piece ends there)")
+                    matches[i] = replace(m, start=start)
             elif a.startswith("a"):
                 rest = a[1:].strip() or _ask(
                     f"Programme number for each of the {len(matches)} segments, + for a piece not in the "

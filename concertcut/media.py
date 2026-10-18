@@ -187,20 +187,25 @@ def load_group(paths: list[str | Path], kind: str) -> list[MediaFile]:
 
 
 def decode(path: str, sr: int, start: float, duration: float, channels: int = 1,
-           stream: int | None = None) -> np.ndarray:
-    """Decode an audio excerpt to float32, shape (samples,) or (samples, channels)."""
+           stream: int | None = None, hq: bool = False) -> np.ndarray:
+    """Decode an audio excerpt to float32, shape (samples,) or (samples, channels).
+
+    ``hq``: resample with soxr (as the FLAC export does) instead of ffmpeg's default.
+    """
     cmd = ["ffmpeg", "-v", "error", "-nostdin"]
     if start > 0:
         cmd += ["-ss", f"{start:.6f}"]
     cmd += ["-t", f"{duration:.6f}", "-i", path, "-map", f"0:{stream}" if stream is not None else "0:a:0",
-            "-vn", "-ac", str(channels), "-ar", str(sr), "-f", "f32le", "-"]
+            "-vn", "-ac", str(channels)]
+    cmd += ["-af", f"aresample={sr}:resampler=soxr:precision=28"] if hq else ["-ar", str(sr)]
+    cmd += ["-f", "f32le", "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True).stdout
     x = np.frombuffer(raw, dtype=np.float32)
     return x if channels == 1 else x.reshape(-1, channels)
 
 
 def decode_group(files: list[MediaFile], sr: int, t0: float, t1: float,
-                 channels: int = 1) -> np.ndarray:
+                 channels: int = 1, hq: bool = False) -> np.ndarray:
     """Decode the stream-time window [t0, t1) of a file group; gaps are silent."""
     n = max(0, int(round((t1 - t0) * sr)))
     out = np.zeros((n, channels) if channels > 1 else n, dtype=np.float32)
@@ -208,7 +213,7 @@ def decode_group(files: list[MediaFile], sr: int, t0: float, t1: float,
         a, b = max(t0, f.start), min(t1, f.end)
         if b <= a:
             continue
-        x = decode(f.path, sr, a - f.start, b - a, channels, f.audio_index)
+        x = decode(f.path, sr, a - f.start, b - a, channels, f.audio_index, hq)
         i = int(round((a - t0) * sr))
         m = min(len(x), n - i)
         out[i:i + m] = x[:m]

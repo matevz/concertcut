@@ -1,19 +1,19 @@
-"""The ``analyze`` step: sources + programme -> plan (sync, pieces, names, gains)."""
+"""The ``analyze`` step: sources + programme -> config (sync, pieces, names, gains)."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
-from . import detect, gain, media, programme as prog, segment, sync
-from .plan import Piece, Plan, Settings
-from .timecode import to_tc
+from . import detect, gain, kdenlive, media, programme as prog, segment, sync
+from .config import Config, Piece, Settings, flac_rate
+from .timecode import to_seconds, to_tc
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +24,49 @@ class RereadProgramme(Exception):
     """Raised by ``confirm_programme`` to read the programme PDF again."""
 
 
+class BackToProgramme(Exception):
+    """Raised by ``confirm_matching`` to go back to the programme question."""
+
+
+class PreviewKdenlive(Exception):
+    """Raised by ``confirm_matching`` to write the Kdenlive project for the current matching."""
+
+
 class RereadMedia(Exception):
     """Raised by ``confirm_matching`` to read the video/audio files again (sync + detection)."""
+
+
+@dataclass
+class SourceMap:
+    """Where a timeline range is in the source files (for showing the user)."""
+    video: list[media.MediaFile]
+    audio: list[media.MediaFile]
+    audio_start: float
+    drift: float = 0.0
+    # concert gain shown and set in the matching question
+    target_dbfs: float = -0.1
+    gain_db: float | None = None  # set by the user; None = automatic (loudest piece at target)
+    flac_rate: int | None = None  # FLAC sample rate override (peaks are measured at that rate)
+
+    def offset_at(self, t: float) -> float:
+        return self.audio_start + self.drift * t
+
+    @property
+    def one_device(self) -> bool:
+        return not self.video or [f.path for f in self.audio] == [f.path for f in self.video]
+
+    def spans(self, t0: float, t1: float, offset: float | None = None) -> dict[str, list[dict]]:
+        """{"camera": [...], "recorder": [...]}, each a list of {file, from, to} (seconds)."""
+        def where(files, a, b):
+            return [{"file": Path(f.path).name, "from": inp, "to": inp + dur}
+                    for f, inp, dur in media.segments(files, a, b) if f is not None]
+        out = {}
+        if self.video:
+            out["camera"] = where(self.video, t0, t1)
+        if not self.one_device or not self.video:
+            off = offset if offset is not None else self.audio_start + self.drift * (t0 + t1) / 2
+            out["recorder"] = where(self.audio, t0 - off, t1 - off)
+        return out
 
 
 @dataclass
@@ -36,8 +77,39 @@ class Match:
     item: prog.ProgrammeItem | None  # None: encore / piece not in the programme
     region: segment.Region
     offset: float | None = None  # measured sync offset (s), None = measure it
-    name: tuple[str, str] | None = None  # (composer, title) kept from an edited plan
+    name: tuple[str, str] | None = None  # (composer, title) kept from an edited config
     enabled: bool = True
+    first_note: float | None = None  # timeline time of the first note; start = first_note - lead-in
+    sources: SourceMap | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def lead_in(self) -> float | None:
+        """Quiet hall kept before the first note (s)."""
+        return None if self.first_note is None else max(0.0, self.first_note - self.start)
+
+    _peak: float | None = field(default=None, repr=False, compare=False)
+    _peak_key: tuple | None = field(default=None, repr=False, compare=False)
+
+    def spans(self) -> dict[str, list[dict]]:
+        return self.sources.spans(self.start, self.end, self.offset) if self.sources else {}
+
+    def recorder_offset(self) -> float:
+        if self.offset is not None:
+            return self.offset
+        return self.sources.offset_at((self.start + self.end) / 2) if self.sources else 0.0
+
+    def peak(self) -> float | None:
+        """Sample peak (dBFS) of the piece in the recording; measured once per cut."""
+        if not self.sources:
+            return None
+        off = self.recorder_offset()
+        key = (round(self.start, 3), round(self.end, 3), round(off, 4))
+        if self._peak_key != key:
+            self._peak = gain.peak_of(self.sources.audio, self.start - off, self.end - self.start,
+                                      flac_rate(self.sources.audio, self.sources.flac_rate))
+            self._peak_key = key
+        return self._peak
+
 
     @property
     def composer(self) -> str:
@@ -50,6 +122,19 @@ class Match:
         if self.name:
             return self.name[1]
         return self.item.title if self.item else ENCORE_TITLE
+
+
+def concert_gain(matches: list[Match]) -> tuple[float | None, Match | None, bool]:
+    """(gain dB, loudest piece, set by the user) for the matching question."""
+    smap = next((m.sources for m in matches if m.sources), None)
+    if smap is None:
+        return None, None, False
+    peaks = [(m.peak(), m) for m in matches if m.enabled]
+    peaks = [(p, m) for p, m in peaks if p is not None and np.isfinite(p)]
+    loudest = max(peaks, key=lambda x: x[0], default=(None, None))
+    if smap.gain_db is not None:
+        return smap.gain_db, loudest[1], True
+    return (None if loudest[0] is None else smap.target_dbfs - loudest[0]), loudest[1], False
 
 
 ProgrammeCallback = Callable[[prog.Programme], prog.Programme]
@@ -167,8 +252,8 @@ def _read_programme(concert_dir: Path, programme_path: str | Path | None, skip: 
     return pr, str(pdf) if pdf else pr.source
 
 
-def _programme_from_plan(plan: Plan) -> prog.Programme | None:
-    d = plan.programme
+def _programme_from_config(config: Config) -> prog.Programme | None:
+    d = config.programme
     if not d.get("items"):
         return None
     header = [x for x in (d.get("concert_title", ""), d.get("performer", "")) if x]
@@ -194,104 +279,93 @@ def _assign_in_order(matches: list[Match], pr: prog.Programme | None) -> list[Ma
 def _detect(vfiles: list[media.MediaFile], afiles: list[media.MediaFile], cache: Path,
             model_dir: str | Path | None, params: segment.SegmentParams | None,
             pr: prog.Programme | None) -> tuple[sync.SyncResult, list[Match], list[str]]:
-    warnings: list[str] = []
+    """Sync, then detection and segmentation."""
     if not vfiles or [f.path for f in afiles] == [f.path for f in vfiles]:
         sres = sync.SyncResult(0.0, 0.0, 1.0, [])  # one device: nothing to sync
     else:
         sres = sync.synchronise(vfiles, afiles)
+    matches, warnings = _segment(vfiles, afiles, sres, cache, model_dir, params, pr)
     if sres.confidence < 0.5:
-        warnings.append(f"low sync confidence ({sres.confidence:.2f}) - check audio/video sync")
+        warnings.insert(0, f"low sync confidence ({sres.confidence:.2f}) - check audio/video sync")
+    return sres, matches, warnings
+
+
+def _segment(vfiles: list[media.MediaFile], afiles: list[media.MediaFile], sres: sync.SyncResult,
+             cache: Path, model_dir: str | Path | None, params: segment.SegmentParams | None,
+             pr: prog.Programme | None) -> tuple[list[Match], list[str]]:
+    """Pieces from the (cached) detector results, for the programme's number of pieces."""
     scores, energy, hf = detection_scores(afiles, cache, model_dir)
-    regions, seg_warnings, _ = segment.segment(scores, energy, hf, 100, media.group_span(afiles),
-                                               len(pr.items) if pr else None, params)
-    warnings += seg_warnings
+    regions, warnings, _ = segment.segment(scores, energy, hf, 100, media.group_span(afiles),
+                                           len(pr.items) if pr else None, params)
     a0, b = sres.audio_start, sres.drift
     to_tl = lambda z: (z + a0) / (1 - b)  # noqa: E731  recorder time -> timeline: t = z + a0 + b t
-    matches = [Match(to_tl(r.start), to_tl(r.end), None, r) for r in regions]
-    return sres, _assign_in_order(matches, pr), warnings
+    smap = SourceMap(vfiles, afiles, sres.audio_start, sres.drift)
+    matches = [Match(to_tl(r.start), to_tl(r.end), None, r, sources=smap,
+                     first_note=None if r.first_note is None else to_tl(r.first_note)) for r in regions]
+    return _assign_in_order(matches, pr), list(warnings)
 
 
-def _from_plan(plan: Plan, pr: prog.Programme | None,
+def _from_config(config: Config, pr: prog.Programme | None,
                programme_changed: bool) -> tuple[sync.SyncResult, list[Match], list[str]]:
-    """The pieces of an existing plan, including the user's edits to it."""
-    d = plan.sync
-    sres = sync.SyncResult(plan.audio_start, float(d.get("drift_ppm", 0.0)) * 1e-6,
+    """The pieces of an existing config, including the user's edits to it."""
+    d = config.sync
+    sres = sync.SyncResult(config.audio_start, float(d.get("drift_ppm", 0.0)) * 1e-6,
                            float(d.get("confidence", 0.0)), [])
     by_no = {i.number: i for i in pr.items} if pr else {}
+    smap = SourceMap(config.video, config.audio, sres.audio_start, sres.drift)
     matches = []
-    for p in plan.pieces:
+    for p in config.pieces:
         det = p.detected
         r = segment.Region(0.0, 0.0, confidence=det.get("confidence", 0.0),
                            start_reason=det.get("start_reason", ""), end_reason=det.get("end_reason", ""),
                            encore=bool(det.get("encore", False)), warnings=[])
         matches.append(Match(p.start, p.end, by_no.get(det.get("programme_number")), r,
-                             offset=plan.audio_start + p.audio_offset_ms / 1000.0,
-                             name=(p.composer, p.title), enabled=p.enabled))
+                             offset=config.audio_start + p.audio_offset_ms / 1000.0,
+                             name=(p.composer, p.title), enabled=p.enabled, sources=smap,
+                             first_note=to_seconds(det.get("first_note"))))
     if programme_changed:
         _assign_in_order(matches, pr)
-    return sres, matches, [w for w in plan.warnings if not w.startswith("no recording matched")]
+    return sres, matches, [w for w in config.warnings if not w.startswith("no recording matched")]
 
 
-def analyze(concert_dir: str | Path, plan_path: str | Path | None = None,
-            programme_path: str | Path | None = None, video: list[str] | None = None,
-            audio: list[str] | None = None, model_dir: str | Path | None = None,
-            artist: str | None = None, settings: dict | None = None,
-            params: segment.SegmentParams | None = None, skip: set[int] | None = None,
-            confirm_programme: ProgrammeCallback | None = None,
-            confirm_matching: MatchingCallback | None = None,
-            enter_programme: EnterProgrammeCallback | None = None) -> Plan:
-    """Analyse a concert folder and write the plan.
+def _attach_gain(matches: list[Match], settings: Settings) -> None:
+    """Give the matching question the gain target and a gain the user set earlier."""
+    for m in matches:
+        if m.sources:
+            m.sources.target_dbfs = settings.peak_dbfs
+            m.sources.flac_rate = settings.flac_sample_rate
+            if m.sources.gain_db is None and not settings.gain_db_auto and settings.gain_db is not None:
+                m.sources.gain_db = settings.gain_db
 
-    An existing plan is reused: its programme and pieces (with the user's edits) are the
-    starting point, and the same confirmations are asked as on the first run. To start
-    from scratch, delete the plan file.
 
-    ``settings``: settings to change (e.g. ``{"peak_dbfs": -0.5}``).
-    ``skip``: programme numbers that were listed but not performed.
-    ``confirm_programme(programme) -> programme``: lets the caller (e.g. the CLI, asking
-    the user) correct the performed programme; may raise RereadProgramme.
-    ``confirm_matching(matches, programme) -> matches``: lets the caller check and fix
-    which segment is which piece; may raise RereadMedia.
-    ``enter_programme(reason) -> programme | None``: asked when no programme could be
-    determined (no PDF, a scanned PDF, nothing recognisable); None = continue without names.
+def _save_programme(config_path: Path, prev: Config | None, pr: prog.Programme | None, programme_info: dict,
+                    changed: bool, concert: dict) -> Config:
+    """Save the confirmed programme right away, so it survives a crash in the slow steps.
+
+    Without a previous config this writes a config with the programme but no pieces yet. With
+    one whose programme changed, its pieces are renamed to match before saving.
     """
-    media.require_ffmpeg()
-    concert_dir = Path(concert_dir)
-    plan_path = Path(plan_path) if plan_path else concert_dir / "concertcut.json"
-    cache = plan_path.with_suffix(".cache.npz")
-    prev = Plan.load(plan_path) if plan_path.exists() else None
-    if prev:
-        log.info("%s already exists, loading existing preferences (delete it to start from scratch)",
-                 plan_path)
+    if prev is None:
+        prev = Config(concert=concert, video=[], audio=[], audio_start=0.0, pieces=[], path=config_path)
+    elif changed and prev.pieces:
+        _, matches, _ = _from_config(prev, pr, True)
+        for p, m in zip(prev.pieces, matches):
+            p.composer = m.composer
+            if m.item or pr:
+                p.title = m.title
+            p.detected["programme_number"] = m.item.number if m.item else None
+            p.detected["encore"] = m.item is None
+    prev.programme, prev.concert = programme_info, concert
+    prev.save(config_path)
+    log.info("programme saved to %s", config_path)
+    return prev
 
-    # programme
-    pr = _programme_from_plan(prev) if prev else None
-    source = prev.programme.get("source", "") if pr else ""
-    if pr is None:
-        pr, source = _read_programme(concert_dir, programme_path, skip, enter_programme)
-    saved = _signature(_programme_from_plan(prev)) if prev else None
-    while pr and confirm_programme:
-        try:
-            pr = confirm_programme(pr)
-            break
-        except RereadProgramme:
-            pr, source = _read_programme(concert_dir, programme_path, skip, enter_programme)
 
-    # media: sync, detection, segments
-    if prev:
-        vfiles, afiles = prev.video, prev.audio
-        sres, matches, warnings = _from_plan(prev, pr, _signature(pr) != saved)
-    else:
-        vfiles, afiles = _load_media(concert_dir, video, audio)
-        sres, matches, warnings = _detect(vfiles, afiles, cache, model_dir, params, pr)
-    while confirm_matching:
-        try:
-            matches = confirm_matching(matches, pr)
-            break
-        except RereadMedia:
-            vfiles, afiles = _load_media(concert_dir, video, audio)
-            sres, matches, warnings = _detect(vfiles, afiles, cache, model_dir, params, pr)
-
+def _build_config(matches: list[Match], pr: prog.Programme | None, sres: sync.SyncResult,
+                vfiles: list[media.MediaFile], afiles: list[media.MediaFile], prev: Config,
+                programme_info: dict, base: Settings, warnings: list[str], config_path: Path) -> Config:
+    """The config for the current matching: sync measured inside new pieces, concert gain."""
+    warnings = list(warnings)
     one_device = not vfiles or [f.path for f in afiles] == [f.path for f in vfiles]
     todo = [m for m in matches if m.offset is None]
     if todo and one_device:
@@ -315,6 +389,10 @@ def analyze(concert_dir: str | Path, plan_path: str | Path | None = None,
                   detected={"confidence": r.confidence, "start_reason": r.start_reason,
                             "end_reason": r.end_reason, "encore": m.item is None and not m.name,
                             "programme_number": m.item.number if m.item else None,
+                            "first_note": to_tc(m.first_note),
+                            "lead_in_s": None if m.lead_in is None else round(m.lead_in, 2),
+                            "sources": {k: [{"file": s["file"], "from": to_tc(s["from"]), "to": to_tc(s["to"])}
+                                            for s in v] for k, v in m.spans().items()},
                             "warnings": list(r.warnings)})
         if vfiles and (m.start < 0 or m.end > media.group_span(vfiles)):
             p.detected["warnings"].append("piece is not fully covered by the camera (black video added)")
@@ -325,28 +403,130 @@ def analyze(concert_dir: str | Path, plan_path: str | Path | None = None,
         warnings.append("no recording matched to programme item(s) "
                         + ", ".join(f"{i.number:02d}" for i in unmatched))
 
-    base = prev.settings if prev else Settings()
-    for k, v in (settings or {}).items():
-        setattr(base, k, v)
+    smap = next((m.sources for m in matches if m.sources), None)
+    if smap is not None and smap.gain_db is not None:  # set by the user in the matching question
+        base.gain_db, base.gain_db_auto, base.gain_limited_by = smap.gain_db, False, ""
+    elif smap is not None:
+        base.gain_db_auto = True
+    known = {n: m._peak for n, m in enumerate(matches, 1)
+             if m._peak is not None and m._peak_key == (round(m.start, 3), round(m.end, 3), round(m.offset, 4))}
     sync_info = {"drift_ppm": round(sres.drift * 1e6, 3), "confidence": round(sres.confidence, 3),
                  "anchors": [{"t": to_tc(a["t"]), "offset": round(a["offset"], 5),
                               "sharpness": round(a["sharpness"], 1), "inlier": a.get("inlier", False)}
-                             for a in sres.anchors] if sres.anchors else (prev.sync.get("anchors", [])
-                                                                          if prev else [])}
-    plan = Plan(
-        concert=_concert_info(concert_dir, pr, artist or (prev.concert.get("artist") if prev else None)),
+                             for a in sres.anchors] if sres.anchors else prev.sync.get("anchors", [])}
+    config = Config(
+        concert=prev.concert,
         video=vfiles, audio=afiles, audio_start=a0, pieces=pieces, sync=sync_info,
-        programme={**(pr.to_dict() if pr else {}), "source": source,
-                   "not_performed": sorted(set(skip or []) | set(prev.programme.get("not_performed", [])
-                                                                  if prev else []))},
-        settings=base, warnings=warnings, path=plan_path,
+        programme=programme_info, settings=base, warnings=warnings, path=config_path,
     )
-    gain.update_gain(plan)
-    for p in plan.pieces:
+    gain.update_gain(config, known)
+    return config
+
+
+def analyze(concert_dir: str | Path, config_path: str | Path | None = None,
+            programme_path: str | Path | None = None, video: list[str] | None = None,
+            audio: list[str] | None = None, model_dir: str | Path | None = None,
+            artist: str | None = None, settings: dict | None = None,
+            params: segment.SegmentParams | None = None, skip: set[int] | None = None,
+            confirm_programme: ProgrammeCallback | None = None,
+            confirm_matching: MatchingCallback | None = None,
+            enter_programme: EnterProgrammeCallback | None = None,
+            project_path: str | Path | None = None) -> Config:
+    """Analyse a concert folder and write the config.
+
+    An existing config is reused: its programme and pieces (with the user's edits) are the
+    starting point, and the same confirmations are asked as on the first run. To start
+    from scratch, delete the config file.
+
+    ``settings``: settings to change (e.g. ``{"peak_dbfs": -0.5}``).
+    ``skip``: programme numbers that were listed but not performed.
+    ``confirm_programme(programme) -> programme``: lets the caller (e.g. the CLI, asking
+    the user) correct the performed programme; may raise RereadProgramme.
+    ``confirm_matching(matches, programme) -> matches``: lets the caller check and fix
+    which segment is which piece; may raise RereadMedia.
+    ``enter_programme(reason) -> programme | None``: asked when no programme could be
+    determined (no PDF, a scanned PDF, nothing recognisable); None = continue without names.
+    """
+    media.require_ffmpeg()
+    concert_dir = Path(concert_dir)
+    config_path = Path(config_path) if config_path else concert_dir / "concertcut.json"
+    cache = config_path.with_suffix(".cache.npz")
+    prev = Config.load(config_path) if config_path.exists() else None
+    if prev:
+        log.info("%s already exists, loading existing preferences (delete it to start from scratch)",
+                 config_path)
+
+    pr = _programme_from_config(prev) if prev else None
+    source = prev.programme.get("source", "") if pr else ""
+    if pr is None:
+        pr, source = _read_programme(concert_dir, programme_path, skip, enter_programme)
+    saved = _signature(_programme_from_config(prev)) if prev else None
+    matches: list[Match] | None = None
+    base = prev.settings if prev else Settings()
+    for k, v in (settings or {}).items():
+        setattr(base, k, v)
+    while True:
+        # 1. the performed programme - saved right away
+        while pr and confirm_programme:
+            try:
+                pr = confirm_programme(pr)
+                break
+            except RereadProgramme:
+                pr, source = _read_programme(concert_dir, programme_path, skip, enter_programme)
+        changed = _signature(pr) != saved
+        not_performed = sorted(set(skip or []) | set(prev.programme.get("not_performed", []) if prev else []))
+        programme_info = {**(pr.to_dict() if pr else {}), "source": source, "not_performed": not_performed}
+        concert = _concert_info(concert_dir, pr, artist or (prev.concert.get("artist") if prev else None))
+        if matches is None:
+            prev = _save_programme(config_path, prev, pr, programme_info, changed, concert)
+        else:
+            prev.programme, prev.concert = programme_info, concert
+            prev.save(config_path)
+            log.info("programme saved to %s", config_path)
+
+        # 2. media: sync, detection, segments (reused from the config once it has pieces)
+        if matches is None:
+            if prev.pieces:
+                vfiles, afiles = prev.video, prev.audio
+                sres, matches, warnings = _from_config(prev, pr, False)
+            else:
+                vfiles, afiles = _load_media(concert_dir, video, audio)
+                sres, matches, warnings = _detect(vfiles, afiles, cache, model_dir, params, pr)
+        elif changed:  # back from the matching question with a different programme
+            n_old = len(saved) if saved is not None else None
+            if pr and n_old is not None and len(pr.items) != n_old:
+                log.info("the number of pieces changed: finding the pieces again")
+                matches, warnings = _segment(vfiles, afiles, sres, cache, model_dir, params, pr)
+            else:
+                _assign_in_order(matches, pr)
+        saved = _signature(pr)
+
+        # 3. which segment is which piece (and the concert gain)
+        try:
+            while confirm_matching:
+                _attach_gain(matches, base)
+                try:
+                    matches = confirm_matching(matches, pr)
+                    break
+                except RereadMedia:
+                    vfiles, afiles = _load_media(concert_dir, video, audio)
+                    sres, matches, warnings = _detect(vfiles, afiles, cache, model_dir, params, pr)
+                except PreviewKdenlive:
+                    preview = _build_config(matches, pr, sres, vfiles, afiles, prev, programme_info, base,
+                                          warnings, config_path)
+                    kpath, opath = kdenlive.write_project(preview, project_path)
+                    log.info("Kdenlive project for checking: %s (and %s)", kpath, opath.name)
+            break
+        except BackToProgramme:
+            if pr is None:
+                pr, source = _read_programme(concert_dir, programme_path, skip, enter_programme)
+
+    config = _build_config(matches, pr, sres, vfiles, afiles, prev, programme_info, base, warnings, config_path)
+    for p in config.pieces:
         log.info("%s  %s - %s  peak %s dBFS  (%s)", p.basename, to_tc(p.start), to_tc(p.end),
                  p.detected.get("peak_dbfs"), p.detected.get("end_reason"))
-    for w in warnings:
+    for w in config.warnings:
         log.warning("%s", w)
-    plan.save()
-    log.info("plan written to %s", plan_path)
-    return plan
+    config.save()
+    log.info("config written to %s", config_path)
+    return config
