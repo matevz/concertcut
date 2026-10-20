@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from concertcut import render
+from concertpub import render
 from test_project import make_config
 
 
@@ -34,8 +34,8 @@ def test_flac_is_cd_quality_with_maximum_compression(tmp_path):
 
 
 def test_flac_rate_never_above_the_recording(tmp_path):
-    from concertcut.config import flac_rate
-    from concertcut.media import MediaFile
+    from concertpub.config import flac_rate
+    from concertpub.media import MediaFile
 
     assert flac_rate([MediaFile("a.wav", 1, sample_rate=96000)]) == 44100
     assert flac_rate([MediaFile("a.wav", 1, sample_rate=32000)]) == 32000

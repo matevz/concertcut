@@ -1,4 +1,4 @@
-from concertcut import programme as prog
+from concertpub import programme as prog
 
 # Layout like the 2024 programme: no blank line between some items, a folk song
 # without composer first, footnote asterisks, bio at the end.
@@ -146,7 +146,7 @@ def test_parse_entered_rejects_duplicates_and_empty():
 def test_mac_decomposed_text_gives_composed_names():
     import unicodedata
 
-    from concertcut.config import Piece
+    from concertpub.config import Piece
 
     text = unicodedata.normalize("NFD", "PROGRAM\nUršula Jašovec (1986):\nIVAN, MOJ SIN, PA KOD SI HODO TI?\n"
                                         "Tri žene iztrgajo mladeniču srce\n")

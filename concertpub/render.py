@@ -73,7 +73,7 @@ def _metadata(config: Config, piece: Piece) -> list[str]:
         "track": str(piece.number),
         "date": c.get("date", ""),
     }
-    # extra tags added by hand in concertcut.json, e.g. "concert": {"tags": {"genre": "Choral"}}
+    # extra tags added by hand in concertpub.json, e.g. "concert": {"tags": {"genre": "Choral"}}
     tags.update({str(k): str(v) for k, v in (c.get("tags") or {}).items()})
     out = []
     for k, v in tags.items():
@@ -148,7 +148,7 @@ def _run(cmd: list[str], out: Path, threads: int | None = None) -> float:
     return time.monotonic() - t
 
 
-MANIFEST = ".concertcut-render.json"
+MANIFEST = ".concertpub-render.json"
 
 
 def _fingerprint(config: Config, cmd: list[str]) -> str:
@@ -198,7 +198,7 @@ def render(config: Config, out_dir: str | Path | None = None, only: set[int] | N
             continue
         if out.exists():
             log.info("%s: %s", "re-rendering" if not force else "overwriting",
-                     out.name if manifest.get(key) else f"{out.name} (not made by concertcut)")
+                     out.name if manifest.get(key) else f"{out.name} (not made by concertpub)")
         out.parent.mkdir(parents=True, exist_ok=True)
         todo.append((cmd, out, key, fp))
     if not only:

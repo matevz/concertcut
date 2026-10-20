@@ -1,4 +1,4 @@
-from concertcut import cli
+from concertpub import cli
 
 
 def test_folder_alone_runs_the_whole_flow(monkeypatch, tmp_path):
@@ -17,3 +17,4 @@ def test_subcommands_unchanged(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cli, "cmd_render", lambda a, config=None: calls.append("render"))
     assert cli.main(["render", str(tmp_path)]) == 0 and calls == ["render"]
+

@@ -1,4 +1,4 @@
-"""Command line: concertcut analyze|render|kdenlive|run|programme."""
+"""Command line: concertpub analyze|render|kdenlive|run|programme."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from . import kdenlive, programme as prog
 from .media import MediaError
 from .config import Config
 
-CONFIG_NAME = "concertcut.json"
+CONFIG_NAME = "concertpub.json"
 
-log = logging.getLogger("concertcut")
+log = logging.getLogger("concertpub")
 
 
 def _only(s: str | None) -> set[int] | None:
@@ -22,7 +22,7 @@ def _only(s: str | None) -> set[int] | None:
 
 def _add_analyze_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("concert_dir", type=Path, help="folder with camera files, recorder WAVs and programme PDF")
-    p.add_argument("--config", type=Path, help="config file to write (default: <concert_dir>/concertcut.json)")
+    p.add_argument("--config", type=Path, help="config file to write (default: <concert_dir>/concertpub.json)")
     p.add_argument("--programme", type=Path, help="programme PDF, text file or JSON list")
     p.add_argument("--video", nargs="+", help="camera files (default: all video files in the folder)")
     p.add_argument("--audio", nargs="+", help="recorder files (default: largest WAV group)")
@@ -54,11 +54,11 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
 
 def _add_project_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--project", type=Path,
-                   help="Kdenlive project to write (default: <concert_dir>/<name>.concertcut.kdenlive)")
+                   help="Kdenlive project to write (default: <concert_dir>/<name>.concertpub.kdenlive)")
 
 
 def _config_path(p: Path) -> Path:
-    """A config file, or a concert folder containing concertcut.json."""
+    """A config file, or a concert folder containing concertpub.json."""
     return p / CONFIG_NAME if p.is_dir() else p
 
 
@@ -117,9 +117,9 @@ def cmd_programme(a) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="concertcut", description="Cut a concert recording into one file per piece.",
-        epilog="concertcut <folder> is short for 'concertcut run <folder>': analyze (asks two "
-               "questions), write the Kdenlive project, render. Use 'concertcut <command> --help' "
+        prog="concertpub", description="Cut a concert recording into one file per piece.",
+        epilog="concertpub <folder> is short for 'concertpub run <folder>': analyze (asks two "
+               "questions), write the Kdenlive project, render. Use 'concertpub <command> --help' "
                "for the options of each command.")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -128,11 +128,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_analyze_args(p)
 
     p = sub.add_parser("render", help="export FLAC/MP4 per piece from a config")
-    p.add_argument("config", type=Path, help="concertcut.json, or the concert folder containing it")
+    p.add_argument("config", type=Path, help="concertpub.json, or the concert folder containing it")
     _add_render_args(p)
 
     p = sub.add_parser("kdenlive", help="write the Kdenlive project (+ .otio) from a config")
-    p.add_argument("config", type=Path, help="concertcut.json, or the concert folder containing it")
+    p.add_argument("config", type=Path, help="concertpub.json, or the concert folder containing it")
     _add_project_args(p)
 
     p = sub.add_parser("run", help="analyze + kdenlive + render")
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("file", type=Path)
 
     argv = list(sys.argv[1:] if argv is None else argv)
-    # "concertcut <folder>" is short for "concertcut run <folder>": the whole flow
+    # "concertpub <folder>" is short for "concertpub run <folder>": the whole flow
     first = next((i for i, x in enumerate(argv) if not x.startswith("-")), None)
     if first is not None and argv[first] not in sub.choices:
         argv.insert(first, "run")

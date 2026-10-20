@@ -1,4 +1,4 @@
-"""The editable config file (``concertcut.json``) shared by all pipeline steps.
+"""The editable config file (``concertpub.json``) shared by all pipeline steps.
 
 All times are on the *timeline*: 0 = first frame of the first camera file, with the
 camera files at their recorded positions. The Zoom/recorder stream time ``z`` for a

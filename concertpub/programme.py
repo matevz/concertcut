@@ -25,7 +25,7 @@ DEFAULT_FOLK_COMPOSER = "Traditional"
 _YEARS = r"\(\s*(?:r\.\s*|\*\s*)?(\d{4}(?:\s*[-–—]\s*(?:\d{4})?)?)\s*\)"
 COMPOSER_RE = re.compile(rf"^(?P<name>[^\W\d_][^()\d]*?)\s*{_YEARS}\s*:?\s*(?P<rest>.*)$")
 # Words recognised when *reading* a programme. Programmes may be printed in Slovenian or
-# English, so both are listed; everything concertcut writes or asks is in English.
+# English, so both are listed; everything concertpub writes or asks is in English.
 SECTION_RE = re.compile(r"^\s*(program|programme|spored|sporedi)\s*:?\s*$", re.I)
 INTERMISSION_RE = re.compile(r"^\s*[-–—*]*\s*(odmor|pavza|intermission|pause|pausa)\b", re.I)
 NOTE_PREFIXES = ("priredba", "prir.", "ljudsk", "besedilo", "po ", "glasba", "solist", "orgle", "klavir",

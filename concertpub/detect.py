@@ -1,8 +1,8 @@
 """Frame-wise music / applause / speech probabilities with PANNs CNN14 (AudioSet).
 
 Runs on CPU. Model weights (~330 MB) and the AudioSet label list are downloaded once
-into the model directory (``--model-dir``, ``$CONCERTCUT_MODEL_DIR`` or
-``~/.cache/concertcut``).
+into the model directory (``--model-dir``, ``$CONCERTPUB_MODEL_DIR`` or
+``~/.cache/concertpub``).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ GROUP_NAMES = list(GROUPS)
 
 
 def default_model_dir() -> Path:
-    return Path(os.environ.get("CONCERTCUT_MODEL_DIR", Path.home() / ".cache" / "concertcut"))
+    return Path(os.environ.get("CONCERTPUB_MODEL_DIR", Path.home() / ".cache" / "concertpub"))
 
 
 def _download(url: str, dest: Path, min_size: int = 0) -> Path:

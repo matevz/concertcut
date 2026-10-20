@@ -4,9 +4,9 @@ from fractions import Fraction
 
 import opentimelineio as otio
 
-from concertcut import kdenlive, otio_export
-from concertcut.media import MediaFile
-from concertcut.config import Config, Piece, safe_filename
+from concertpub import kdenlive, otio_export
+from concertpub.media import MediaFile
+from concertpub.config import Config, Piece, safe_filename
 
 
 def make_config(tmp_path) -> Config:

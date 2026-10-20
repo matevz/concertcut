@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from concertcut import analyze as A, programme as prog, segment, sync
-from concertcut.media import MediaFile
+from concertpub import analyze as A, programme as prog, segment, sync
+from concertpub.media import MediaFile
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ def fake(monkeypatch, tmp_path):
 
 
 def run(tmp_path, **kw):
-    return A.analyze(tmp_path, tmp_path / "concertcut.json", **kw)
+    return A.analyze(tmp_path, tmp_path / "concertpub.json", **kw)
 
 
 def test_first_run_then_reuse_keeps_edits(fake):
@@ -57,11 +57,11 @@ def test_first_run_then_reuse_keeps_edits(fake):
     config = run(tmp)
     assert [p.basename for p in config.pieces] == ["01 C1 - T1", "02 C2 - T2", "03 C3 - T3", "04 Encore"]
     # the user edits the config by hand
-    d = json.loads((tmp / "concertcut.json").read_text())
+    d = json.loads((tmp / "concertpub.json").read_text())
     d["pieces"][3]["title"] = "Zdravljica"
     d["pieces"][1]["enabled"] = False
     d["pieces"][0]["end"] = "00:01:35.000"
-    (tmp / "concertcut.json").write_text(json.dumps(d))
+    (tmp / "concertpub.json").write_text(json.dumps(d))
 
     seen = {}
     config = run(tmp, confirm_programme=lambda pr: seen.setdefault("pr", pr),
@@ -112,7 +112,7 @@ def test_reread_programme_and_media(fake):
 def test_deleted_config_starts_from_scratch(fake):
     calls, tmp = fake
     run(tmp)
-    (tmp / "concertcut.json").unlink()
+    (tmp / "concertpub.json").unlink()
     run(tmp)
     assert calls == {"detect": 2, "read": 2}
 
@@ -152,7 +152,7 @@ def test_programme_saved_before_slow_steps(fake):
 
     with pytest.raises(Crash):  # crash at the matching question of the first run
         run(tmp, confirm_programme=skip_two, confirm_matching=crash)
-    d = json.loads((tmp / "concertcut.json").read_text())
+    d = json.loads((tmp / "concertpub.json").read_text())
     assert [i["number"] for i in d["programme"]["items"]] == [1, 3] and d["pieces"] == []
     # the next run starts from the saved programme and runs the detection again
     config = run(tmp)
@@ -170,7 +170,7 @@ def test_changed_programme_renames_saved_pieces_immediately(fake):
 
     with pytest.raises(Crash):
         run(tmp, confirm_programme=skip_two, confirm_matching=crash)
-    d = json.loads((tmp / "concertcut.json").read_text())
+    d = json.loads((tmp / "concertpub.json").read_text())
     assert [(p["composer"], p["title"]) for p in d["pieces"]] == [
         ("C1", "T1"), ("C3", "T3"), ("", "Encore"), ("", "Encore")]
 
@@ -224,7 +224,7 @@ def test_back_and_skip_finds_pieces_again(fake):
                confirm_matching=scripted(A.BackToProgramme(), lambda ms, pr: ms))
     assert calls["detect"] == 1 and calls["segment"] == 1
     assert [p.basename for p in config.pieces][:2] == ["01 C1 - T1", "02 C3 - T3"]
-    assert [i["number"] for i in json.loads((tmp / "concertcut.json").read_text())["programme"]["items"]] == [1, 3]
+    assert [i["number"] for i in json.loads((tmp / "concertpub.json").read_text())["programme"]["items"]] == [1, 3]
 
 
 def test_gain_set_in_matching_question_is_saved_and_shown_again(fake):
@@ -256,14 +256,14 @@ def test_kdenlive_preview_from_matching_question(fake):
         if "previewed" not in seen:
             seen["previewed"] = True
             raise A.PreviewKdenlive()
-        seen["config_saved_before_confirm"] = bool(json.loads((tmp / "concertcut.json").read_text())["pieces"])
+        seen["config_saved_before_confirm"] = bool(json.loads((tmp / "concertpub.json").read_text())["pieces"])
         return ms
 
     run(tmp, confirm_matching=preview_then_confirm)
-    project = tmp / f"{tmp.name}.concertcut.kdenlive"
+    project = tmp / f"{tmp.name}.concertpub.kdenlive"
     assert project.exists() and project.with_suffix(".otio").exists()
     assert "01 C1 - T1" in project.read_text()  # the guides of the current matching
-    assert seen["config_saved_before_confirm"] is False  # concertcut.json waits for the confirmation
+    assert seen["config_saved_before_confirm"] is False  # concertpub.json waits for the confirmation
     # a second preview keeps the first project as .bak
     seen.clear()
     run(tmp, confirm_matching=preview_then_confirm)
@@ -273,10 +273,10 @@ def test_kdenlive_preview_from_matching_question(fake):
 def test_hand_edited_concert_tags_are_kept(fake):
     calls, tmp = fake
     run(tmp)
-    d = json.loads((tmp / "concertcut.json").read_text())
+    d = json.loads((tmp / "concertpub.json").read_text())
     d["concert"].update(album="Bolečina in lepota", date="2026-10-16", artist="Komorni zbor De profundis Kranj",
                         conductor="Branka Potočnik Krajnik")
-    (tmp / "concertcut.json").write_text(json.dumps(d, ensure_ascii=False))
+    (tmp / "concertpub.json").write_text(json.dumps(d, ensure_ascii=False))
     plan = run(tmp)
     assert plan.concert["album"] == "Bolečina in lepota" and plan.concert["date"] == "2026-10-16"
     assert plan.concert["conductor"] == "Branka Potočnik Krajnik"  # extra fields survive too

@@ -273,7 +273,7 @@ def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=i
                         raise ValueError("no such segment")
                     m = matches[i]
                     if m.first_note is None:
-                        out(f"  segment {i + 1}: the first note is not known, edit start in concertcut.json")
+                        out(f"  segment {i + 1}: the first note is not known, edit start in concertpub.json")
                         continue
                     start = m.first_note - secs
                     if i > 0 and start < matches[i - 1].end:

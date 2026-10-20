@@ -12,10 +12,10 @@ models/
 work/
 plans/
 
-# Files concertcut writes next to the media, in case it is run inside the repository
-concertcut.json
-concertcut.cache.npz
+# Files concertpub writes next to the media, in case it is run inside the repository
+concertpub.json
+concertpub.cache.npz
 *.part.*
 render/
-*.concertcut.kdenlive
-*.concertcut.otio
+*.concertpub.kdenlive
+*.concertpub.otio

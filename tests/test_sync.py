@@ -1,7 +1,7 @@
 import numpy as np
 
-from concertcut import sync
-from concertcut.media import MediaFile, segments
+from concertpub import sync
+from concertpub.media import MediaFile, segments
 
 
 def test_xcorr_lag_finds_shift():

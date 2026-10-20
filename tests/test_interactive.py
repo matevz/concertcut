@@ -1,6 +1,6 @@
-from concertcut import interactive, programme as prog
-from concertcut.analyze import Match
-from concertcut.segment import Region
+from concertpub import interactive, programme as prog
+from concertpub.analyze import Match
+from concertpub.segment import Region
 
 
 def scripted(*answers):
@@ -50,7 +50,7 @@ def test_enter_programme_retries_and_skips():
 
 def test_reread_options_raise():
     import pytest
-    from concertcut.analyze import RereadMedia, RereadProgramme
+    from concertpub.analyze import RereadMedia, RereadProgramme
 
     with pytest.raises(RereadProgramme):
         interactive.confirm_programme(make_programme(), scripted("r"), out=lambda *a: None)
@@ -59,11 +59,11 @@ def test_reread_options_raise():
 
 
 def test_matching_shows_positions_in_source_files(monkeypatch):
-    from concertcut import gain
-    from concertcut.analyze import SourceMap
+    from concertpub import gain
+    from concertpub.analyze import SourceMap
 
     monkeypatch.setattr(gain, "peak_of", lambda audio, z0, dur, rate=None: -9.0)
-    from concertcut.media import MediaFile
+    from concertpub.media import MediaFile
 
     cams = [MediaFile("/m/S1.MP4", 1000.0, start=0.0), MediaFile("/m/S2.MP4", 1000.0, start=1000.0)]
     rec = [MediaFile("/m/ZOOM-0001.WAV", 3000.0, start=0.0)]
@@ -80,8 +80,8 @@ def test_matching_shows_positions_in_source_files(monkeypatch):
 
 
 def test_camera_sound_only_shows_camera():
-    from concertcut.analyze import SourceMap
-    from concertcut.media import MediaFile
+    from concertpub.analyze import SourceMap
+    from concertpub.media import MediaFile
 
     cams = [MediaFile("/m/S1.MP4", 4000.0, start=0.0)]
     m = Match(3700.0, 3720.0, None, Region(0, 1), sources=SourceMap(cams, list(cams), 0.0))
@@ -91,7 +91,7 @@ def test_camera_sound_only_shows_camera():
 
 def test_back_option_raises():
     import pytest
-    from concertcut.analyze import BackToProgramme
+    from concertpub.analyze import BackToProgramme
 
     with pytest.raises(BackToProgramme):
         interactive.confirm_matching([], None, scripted("b"), out=lambda *a: None)
@@ -123,9 +123,9 @@ def test_numbering_notes():
 
 
 def test_gain_shown_and_set(monkeypatch):
-    from concertcut import gain
-    from concertcut.analyze import SourceMap, concert_gain
-    from concertcut.media import MediaFile
+    from concertpub import gain
+    from concertpub.analyze import SourceMap, concert_gain
+    from concertpub.media import MediaFile
 
     peaks = {0.0: -12.0, 100.0: -8.75, 200.0: -10.0}  # by recorder start
     monkeypatch.setattr(gain, "peak_of", lambda audio, z0, dur, rate=None: peaks[round(z0, 1)])
@@ -150,7 +150,7 @@ def test_gain_shown_and_set(monkeypatch):
 
 def test_kdenlive_option_raises():
     import pytest
-    from concertcut.analyze import PreviewKdenlive
+    from concertpub.analyze import PreviewKdenlive
 
     with pytest.raises(PreviewKdenlive):
         interactive.confirm_matching([], None, scripted("k"), out=lambda *a: None)

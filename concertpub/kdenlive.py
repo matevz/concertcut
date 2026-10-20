@@ -300,7 +300,7 @@ def build(config: Config) -> ET.ElementTree:
 
 
 def default_path(config: Config) -> Path:
-    return config.concert_dir / f"{config.concert['name']}.concertcut.kdenlive"
+    return config.concert_dir / f"{config.concert['name']}.concertpub.kdenlive"
 
 
 def write_project(config: Config, path: str | Path | None = None) -> tuple[Path, Path]:

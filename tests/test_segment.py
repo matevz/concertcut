@@ -1,7 +1,7 @@
 import numpy as np
 
-from concertcut import segment
-from concertcut.gain import fade_curve
+from concertpub import segment
+from concertpub.gain import fade_curve
 
 FPS = 100
 

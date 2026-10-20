@@ -1,9 +1,9 @@
 <p align="center"><img src="logo.png" width="160" alt="Concert Cut logo"></p>
 
-<h1 align="center">Concert Cut</h1>
+<h1 align="center">Concert Pub</h1>
 
 Turns the recording of a concert — camera video, a separate field recorder (e.g. a Zoom
-H6) and the printed programme — into one file per piece:
+H6) and the printed programme — into one publishable file per piece:
 
 ```
 render/audio/01 Uršula Jašovec - Grajska gospa in berač.flac
@@ -42,12 +42,12 @@ after the programme, and the whole concert gets one constant gain.
 
 ```bash
 sudo apt install ffmpeg poppler-utils
-git clone <this repository> && cd concertcut
+git clone <this repository> && cd concertpub
 uv sync            # installs a CPU-only build of PyTorch
 ```
 
 The detector weights (PANNs CNN14, ~330 MB) are downloaded on first use to
-`~/.cache/concertcut` (change with `--model-dir` or `$CONCERTCUT_MODEL_DIR`).
+`~/.cache/concertpub` (change with `--model-dir` or `$CONCERTPUB_MODEL_DIR`).
 
 ## Quickstart
 
@@ -55,11 +55,11 @@ Put the camera files, the recorder WAVs and the programme PDF of one concert in 
 then run:
 
 ```bash
-uv run concertcut /path/to/concert
+uv run concertpub /path/to/concert
 ```
 
 It asks you two questions and writes everything next to the media:
-`concertcut.json` (what was found and confirmed), a Kdenlive project, and the pieces in
+`concertpub.json` (what was found and confirmed), a Kdenlive project, and the pieces in
 `render/audio/*.flac` and `render/video/*.mp4`.
 
 ```mermaid
@@ -86,7 +86,7 @@ flowchart TD
     end
     subgraph S5 [" "]
         direction LR
-        D["3. Save the config"] ~~~ nD["concertcut.json<br/>one constant gain: loudest piece at −0.1 dBFS"]
+        D["3. Save the config"] ~~~ nD["concertpub.json<br/>one constant gain: loudest piece at −0.1 dBFS"]
     end
     subgraph S6 [" "]
         direction LR
@@ -114,14 +114,14 @@ Every step can also be run on its own (`analyze`, `kdenlive`, `render`), and eve
 command has options — see:
 
 ```bash
-uv run concertcut --help
-uv run concertcut analyze --help
+uv run concertpub --help
+uv run concertpub analyze --help
 ```
 
 ### Metadata
 
-The tags written to the files come from `concertcut.json`. To change them, edit the file
-and run `concertcut` again — your values are kept on later runs:
+The tags written to the files come from `concertpub.json`. To change them, edit the file
+and run `concertpub` again — your values are kept on later runs:
 
 ```json
 "concert": {
