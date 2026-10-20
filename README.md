@@ -28,6 +28,10 @@ after the programme, and the whole concert gets one constant gain.
   confirmed which pieces were actually performed and how the recording matches them.
 - **Raise the volume** of the whole concert by one constant amount — as much as possible
   without clipping in any piece. No fades, compression or other processing.
+- **Remove a constant buzz** (optional): mains hum from an amplifier or speaker near the
+  stage is detected in the quiet pauses; if found, the matching question warns about it and
+  `h` removes it from the exports with narrow notch filters that follow the mains frequency
+  as it drifts, leaving the music untouched.
 - **Export** FLAC (recorder audio in CD quality — 44.1 kHz / 16-bit, dithered, maximum
   lossless compression; lower-quality recordings are kept as they are) and MP4 (camera
   video in its original resolution and frame rate, x264 CRF 22 — the quality of a Kdenlive

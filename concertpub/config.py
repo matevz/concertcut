@@ -21,7 +21,7 @@ VERSION = 1
 _BAD_CHARS = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
 
 
-CD_RATE, CD_BITS = 44100, 16
+CD_RATE = 44100
 
 
 def flac_rate(audio: list[MediaFile], override: int | None = None) -> int:
@@ -52,6 +52,7 @@ class Settings:
     x264_crf: int = 22  # matches the quality of a Kdenlive render (CRF 23, faster preset)
     x264_preset: str = "slow"
     aac_bitrate: str = "320k"
+    hum_removal: bool = False  # remove the detected mains hum / buzz (see Config.noise) in the exports
 
     def to_dict(self) -> dict:
         d = dict(self.__dict__)
@@ -150,9 +151,15 @@ class Config:
     programme: dict = field(default_factory=dict)
     settings: Settings = field(default_factory=Settings)
     warnings: list[str] = field(default_factory=list)
+    noise: dict = field(default_factory=dict)  # {"hum": {...} or None}: a constant buzz found in the recording
     path: Path | None = None
 
     # -- geometry --------------------------------------------------------------------
+    @property
+    def active_hum(self) -> dict | None:
+        """The detected buzz, if it is to be removed from the exports (see noise.dehum)."""
+        return self.noise.get("hum") if self.settings.hum_removal else None
+
     @property
     def flac_rate(self) -> int:
         return flac_rate(self.audio, self.settings.flac_sample_rate)
@@ -228,6 +235,7 @@ class Config:
             "programme": self.programme,
             "sync": {"audio_start": to_tc(self.audio_start), **self.sync},
             "settings": self.settings.to_dict(),
+            "noise": self.noise,
             "warnings": self.warnings,
             "pieces": [p.to_dict() for p in self.pieces],
         }
@@ -259,5 +267,6 @@ class Config:
             programme=d.get("programme", {}),
             settings=Settings.from_dict(d.get("settings", {})),
             warnings=d.get("warnings", []),
+            noise=d.get("noise", {}),
             path=path,
         )

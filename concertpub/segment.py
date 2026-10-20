@@ -17,7 +17,6 @@ import numpy as np
 from scipy.ndimage import median_filter, uniform_filter1d
 
 MUSIC, APPLAUSE, SPEECH, OTHER = 0, 1, 2, 3
-LABEL_NAMES = ["music", "applause", "speech", "other"]
 RATE = 10  # label frames per second
 
 

@@ -76,3 +76,34 @@ def test_extra_tags_from_the_config(tmp_path):
     meta = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-metadata"]
     assert "album=Bolečina in lepota" in meta and "date=2026-10-16" in meta
     assert "genre=Choral" in meta and "conductor=Branka Potočnik Krajnik" in meta
+
+
+def test_buzz_removal_uses_the_prepared_audio(tmp_path, capsys):
+    config = make_config(tmp_path)
+    config.noise = {"hum": {"mains_hz": 50.0, "harmonics": [{"hz": 50.0, "db": 23.0}], "strongest_db": 23.0}}
+    plain = render.flac_command(config, config.pieces[0], tmp_path / "x.flac")
+    assert "f32le" not in plain  # off by default: straight from the recorder files
+    config.settings.hum_removal = True
+    render.render(config, tmp_path / "out", dry_run=True, video=False)
+    out = capsys.readouterr().out
+    assert out.count(".concertpub-tmp/") == 3 and "f32le" in out and "bandreject" not in out
+
+
+def test_buzz_removed_in_the_original_quality(tmp_path, monkeypatch, capsys):
+    from concertpub import gain
+
+    config = make_config(tmp_path)  # 96 kHz / 24-bit recorder
+    config.noise = {"hum": {"mains_hz": 50.0, "harmonics": [{"hz": 50.0, "db": 23.0}], "strongest_db": 23.0}}
+    config.settings.hum_removal = True
+    rates = []
+    monkeypatch.setattr(gain, "raw_audio", lambda c, p, rate=None: rates.append(rate) or "audio")
+    monkeypatch.setattr(gain.noise, "dehum", lambda x, sr, hum, workers=None: rates.append(("dehum", sr)) or "clean")
+    assert gain.piece_audio(config, config.pieces[0]) == ("clean", 96000)
+    assert rates == [96000, ("dehum", 96000)]  # decoded and cleaned at 96 kHz, not at 44.1 kHz
+    render.render(config, tmp_path / "out", dry_run=True)
+    out = capsys.readouterr().out
+    flac = next(l for l in out.splitlines() if l.rstrip().endswith(".flac'") or ".flac" in l.split()[-1])
+    assert "-ar 96000" in flac and "aresample=44100" in flac and "osf=s16" in flac  # then to CD quality
+    mp4 = next(l for l in out.splitlines() if ".mp4" in l.split()[-1])
+    assert "-ar 96000" in mp4 and "aresample=44100" in mp4
+

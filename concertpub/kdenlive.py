@@ -20,7 +20,6 @@ import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
 
-from . import media
 from .media import MediaFile
 from .config import Config
 

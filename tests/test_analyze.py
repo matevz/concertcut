@@ -39,6 +39,7 @@ def fake(monkeypatch, tmp_path):
 
     monkeypatch.setattr(A.media, "require_ffmpeg", lambda: None)
     monkeypatch.setattr(A, "_segment", segment_again)
+    monkeypatch.setattr(A, "_noise", lambda *a: {"hum": None})
     monkeypatch.setattr(A, "_load_media", lambda *a: (video, audio))
     monkeypatch.setattr(A, "_read_programme", read)
     monkeypatch.setattr(A, "_detect", detect)

@@ -11,7 +11,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import detect, gain, kdenlive, media, programme as prog, segment, sync
+from . import detect, gain, kdenlive, media, noise, programme as prog, segment, sync
 from .config import Config, Piece, Settings, flac_rate
 from .timecode import to_seconds, to_tc
 
@@ -47,6 +47,8 @@ class SourceMap:
     target_dbfs: float = -0.1
     gain_db: float | None = None  # set by the user; None = automatic (loudest piece at target)
     flac_rate: int | None = None  # FLAC sample rate override (peaks are measured at that rate)
+    hum: dict | None = None  # constant buzz found in the recording
+    hum_removal: bool | None = None  # chosen in the matching question; None = as in the settings
 
     def offset_at(self, t: float) -> float:
         return self.audio_start + self.drift * t
@@ -98,13 +100,23 @@ class Match:
             return self.offset
         return self.sources.offset_at((self.start + self.end) / 2) if self.sources else 0.0
 
+    def _current_peak_key(self) -> tuple:
+        return (round(self.start, 3), round(self.end, 3), round(self.recorder_offset(), 4))
+
+    @property
+    def peak_stale(self) -> bool:
+        """True when the peak has to be measured (again), e.g. after the cut changed."""
+        return self.sources is not None and self._peak_key != self._current_peak_key()
+
     def peak(self) -> float | None:
         """Sample peak (dBFS) of the piece in the recording; measured once per cut."""
         if not self.sources:
             return None
         off = self.recorder_offset()
-        key = (round(self.start, 3), round(self.end, 3), round(off, 4))
+        key = self._current_peak_key()
         if self._peak_key != key:
+            # measured on the recording as it is; a buzz is removed (and the gain measured on
+            # the cleaned audio) only when rendering
             self._peak = gain.peak_of(self.sources.audio, self.start - off, self.end - self.start,
                                       flac_rate(self.sources.audio, self.sources.flac_rate))
             self._peak_key = key
@@ -328,10 +340,20 @@ def _from_config(config: Config, pr: prog.Programme | None,
     return sres, matches, [w for w in config.warnings if not w.startswith("no recording matched")]
 
 
-def _attach_gain(matches: list[Match], settings: Settings) -> None:
-    """Give the matching question the gain target and a gain the user set earlier."""
+def _noise(afiles: list[media.MediaFile], cache: Path, model_dir: str | Path | None) -> dict:
+    """Look for a constant buzz in the quiet stretches of the recording."""
+    _, energy, _ = detection_scores(afiles, cache, model_dir)
+    return noise.detect(afiles, energy)
+
+
+def _attach_gain(matches: list[Match], settings: Settings, noise_info: dict | None = None) -> None:
+    """Give the matching question the gain target, a gain the user set earlier, and the
+    buzz found in the recording with the current choice about removing it."""
     for m in matches:
         if m.sources:
+            m.sources.hum = (noise_info or {}).get("hum")
+            if m.sources.hum_removal is None:
+                m.sources.hum_removal = settings.hum_removal and bool(m.sources.hum)
             m.sources.target_dbfs = settings.peak_dbfs
             m.sources.flac_rate = settings.flac_sample_rate
             if m.sources.gain_db is None and not settings.gain_db_auto and settings.gain_db is not None:
@@ -363,9 +385,13 @@ def _save_programme(config_path: Path, prev: Config | None, pr: prog.Programme |
 
 def _build_config(matches: list[Match], pr: prog.Programme | None, sres: sync.SyncResult,
                 vfiles: list[media.MediaFile], afiles: list[media.MediaFile], prev: Config,
-                programme_info: dict, base: Settings, warnings: list[str], config_path: Path) -> Config:
+                programme_info: dict, base: Settings, warnings: list[str], config_path: Path,
+                noise_info: dict | None = None) -> Config:
     """The config for the current matching: sync measured inside new pieces, concert gain."""
     warnings = list(warnings)
+    smap0 = next((m.sources for m in matches if m.sources), None)
+    if smap0 is not None and smap0.hum_removal is not None:
+        base.hum_removal = bool(smap0.hum_removal)
     one_device = not vfiles or [f.path for f in afiles] == [f.path for f in vfiles]
     todo = [m for m in matches if m.offset is None]
     if todo and one_device:
@@ -408,7 +434,7 @@ def _build_config(matches: list[Match], pr: prog.Programme | None, sres: sync.Sy
         base.gain_db, base.gain_db_auto, base.gain_limited_by = smap.gain_db, False, ""
     elif smap is not None:
         base.gain_db_auto = True
-    known = {n: m._peak for n, m in enumerate(matches, 1)
+    known = {n: m._peak for n, m in enumerate(matches, 1)  # peaks from the matching question
              if m._peak is not None and m._peak_key == (round(m.start, 3), round(m.end, 3), round(m.offset, 4))}
     sync_info = {"drift_ppm": round(sres.drift * 1e6, 3), "confidence": round(sres.confidence, 3),
                  "anchors": [{"t": to_tc(a["t"]), "offset": round(a["offset"], 5),
@@ -418,6 +444,7 @@ def _build_config(matches: list[Match], pr: prog.Programme | None, sres: sync.Sy
         concert=prev.concert,
         video=vfiles, audio=afiles, audio_start=a0, pieces=pieces, sync=sync_info,
         programme=programme_info, settings=base, warnings=warnings, path=config_path,
+        noise=noise_info or {},
     )
     gain.update_gain(config, known)
     return config
@@ -493,9 +520,11 @@ def analyze(concert_dir: str | Path, config_path: str | Path | None = None,
             if prev.pieces:
                 vfiles, afiles = prev.video, prev.audio
                 sres, matches, warnings = _from_config(prev, pr, False)
+                noise_info = prev.noise or _noise(afiles, cache, model_dir)
             else:
                 vfiles, afiles = _load_media(concert_dir, video, audio)
                 sres, matches, warnings = _detect(vfiles, afiles, cache, model_dir, params, pr)
+                noise_info = _noise(afiles, cache, model_dir)
         elif changed:  # back from the matching question with a different programme
             n_old = len(saved) if saved is not None else None
             if pr and n_old is not None and len(pr.items) != n_old:
@@ -508,16 +537,17 @@ def analyze(concert_dir: str | Path, config_path: str | Path | None = None,
         # 3. which segment is which piece (and the concert gain)
         try:
             while confirm_matching:
-                _attach_gain(matches, base)
+                _attach_gain(matches, base, noise_info)
                 try:
                     matches = confirm_matching(matches, pr)
                     break
                 except RereadMedia:
                     vfiles, afiles = _load_media(concert_dir, video, audio)
                     sres, matches, warnings = _detect(vfiles, afiles, cache, model_dir, params, pr)
+                    noise_info = _noise(afiles, cache, model_dir)
                 except PreviewKdenlive:
                     preview = _build_config(matches, pr, sres, vfiles, afiles, prev, programme_info, base,
-                                          warnings, config_path)
+                                            warnings, config_path, noise_info)
                     kpath, opath = kdenlive.write_project(preview, project_path)
                     log.info("Kdenlive project for checking: %s (and %s)", kpath, opath.name)
             break
@@ -525,7 +555,10 @@ def analyze(concert_dir: str | Path, config_path: str | Path | None = None,
             if pr is None:
                 pr, source = _read_programme(concert_dir, programme_path, skip, enter_programme)
 
-    config = _build_config(matches, pr, sres, vfiles, afiles, prev, programme_info, base, warnings, config_path)
+    if not confirm_matching:
+        _attach_gain(matches, base, noise_info)
+    config = _build_config(matches, pr, sres, vfiles, afiles, prev, programme_info, base, warnings, config_path,
+                           noise_info)
     for p in config.pieces:
         log.info("%s  %s - %s  peak %s dBFS  (%s)", p.basename, to_tc(p.start), to_tc(p.end),
                  p.detected.get("peak_dbfs"), p.detected.get("end_reason"))

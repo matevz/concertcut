@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from . import media
+from . import media, noise
 from .config import Config, Piece, flac_rate
 
 log = logging.getLogger(__name__)
@@ -38,15 +40,38 @@ def peak_of(audio: list[media.MediaFile], z0: float, duration: float, rate: int 
     return peak_dbfs(x)
 
 
-def measure_piece(config: Config, piece: Piece) -> float:
-    """Sample peak (dBFS) of the recorder audio of ``piece``, after fades."""
+def raw_audio(config: Config, piece: Piece, rate: int | None = None) -> np.ndarray:
+    """The recording of ``piece`` as it is, at ``rate`` (default: the FLAC sample rate).
+    Shape (samples, channels)."""
     a = config.audio[0]
-    sr, ch = config.flac_rate, max(1, a.channels)
+    sr, ch = rate or config.flac_rate, max(1, a.channels)
     z0 = config.audio_time(piece, piece.start)
     x = media.decode_group(config.audio, sr, z0, z0 + piece.duration, channels=ch, hq=sr != a.sample_rate)
+    return x.reshape(len(x), -1)
+
+
+def piece_audio(config: Config, piece: Piece, workers: int | None = None) -> tuple[np.ndarray, int]:
+    """The recording of ``piece`` as it goes into the exports, and its sample rate.
+
+    With buzz removal, the buzz is removed in the recording's original quality (e.g. 96 kHz,
+    as floating point); the exports convert to CD quality afterwards. Without it, the audio
+    is returned at the FLAC sample rate. Shape (samples, channels).
+    """
+    hum = config.active_hum
+    if not hum:
+        return raw_audio(config, piece), config.flac_rate
+    sr = config.audio[0].sample_rate
+    return noise.dehum(raw_audio(config, piece, sr), sr, hum, workers=workers), sr
+
+
+def measure_piece(config: Config, piece: Piece, x: np.ndarray | None = None) -> float:
+    """Sample peak (dBFS) of the recording of ``piece`` at the FLAC sample rate (before the
+    gain), after fades. Measured on the recording as it is, with a buzz if there is one:
+    removing the buzz only lowers the peaks, so the cleaned exports cannot clip."""
+    x = raw_audio(config, piece) if x is None else x
+    sr = config.flac_rate
     g = fade_curve(len(x), int(config.fade_in(piece) * sr), int(config.fade_out(piece) * sr))
-    x = x * (g[:, None] if x.ndim == 2 else g)
-    return peak_dbfs(x)
+    return peak_dbfs(x * g[:, None])
 
 
 def update_gain(config: Config, known: dict[int, float] | None = None) -> None:
@@ -56,10 +81,12 @@ def update_gain(config: Config, known: dict[int, float] | None = None) -> None:
     ``known``: peaks already measured, by piece number (not measured again).
     """
     peaks = []
-    for p in config.enabled_pieces():
-        peak = known[p.number] if known and p.number in known and not (config.settings.fade_in_s or
-                                                                         config.settings.fade_out_s) \
-            else measure_piece(config, p)
+    pieces = config.enabled_pieces()
+    todo = [p for p in pieces if not (known and p.number in known)]
+    with ThreadPoolExecutor(max_workers=max(1, min(len(todo), os.cpu_count() or 1))) as ex:
+        measured = dict(zip((p.number for p in todo), ex.map(lambda p: measure_piece(config, p), todo)))
+    for p in pieces:
+        peak = known[p.number] if known and p.number in known else measured[p.number]
         p.detected["peak_dbfs"] = round(peak, 2) if np.isfinite(peak) else None
         if np.isfinite(peak):
             peaks.append((peak, p))
@@ -72,5 +99,8 @@ def update_gain(config: Config, known: dict[int, float] | None = None) -> None:
     config.settings.gain_db = config.settings.peak_dbfs - loudest
     config.settings.gain_db_auto = True
     config.settings.gain_limited_by = piece.basename
-    log.info("concert gain %+.2f dB (limited by %s, peak %.2f dBFS)", config.settings.gain_db,
-             piece.basename, loudest)
+    buzz = noise.state(config.noise.get("hum"), config.active_hum is not None)
+    if config.active_hum:
+        buzz = "buzz removed when rendering, gain measured with it"
+    log.info("concert gain %+.2f dB (limited by %s, peak %.2f dBFS; %s)", config.settings.gain_db,
+             piece.basename, loudest, buzz)

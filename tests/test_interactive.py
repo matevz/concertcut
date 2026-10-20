@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from concertpub import interactive, programme as prog
 from concertpub.analyze import Match
 from concertpub.segment import Region
@@ -137,6 +139,7 @@ def test_gain_shown_and_set(monkeypatch):
     interactive.show_matching(ms, None, out=lines.append)
     text = "\n".join(lines)
     assert "-8.8 dB*" in text and "-12.0 dB " in text and "Concert gain: +8.65 dB (automatic" in text
+    assert "peaks at -0.1 dBFS)" in text and lines[-1] == ""  # empty line before the question
 
     out = interactive.confirm_matching(ms, None, scripted("g 10", "y"), out=lambda *a: None)
     assert concert_gain(out)[:3:2] == (10.0, True)
@@ -154,3 +157,62 @@ def test_kdenlive_option_raises():
 
     with pytest.raises(PreviewKdenlive):
         interactive.confirm_matching([], None, scripted("k"), out=lambda *a: None)
+
+
+def test_buzz_warning_and_toggle(monkeypatch):
+    from concertpub import gain
+    from concertpub.analyze import SourceMap
+    from concertpub.media import MediaFile
+
+    measured = []
+    monkeypatch.setattr(gain, "peak_of", lambda audio, z0, dur, rate=None: measured.append(z0) or -8.0)
+    hum = {"mains_hz": 50.0, "harmonics": [{"hz": 50.0, "db": 23.0}, {"hz": 150.0, "db": 18.0}],
+           "strongest_db": 23.0}
+    smap = SourceMap([], [MediaFile("/m/r.wav", 400.0)], 0.0, hum=hum, hum_removal=False)
+    ms = [Match(0.0, 90.0, None, Region(0, 1), offset=0.0, sources=smap)]
+    lines = []
+    interactive.show_matching(ms, None, out=lines.append)
+    text = "\n".join(lines)
+    assert "WARNING: a constant buzz was found" in text and "Buzz removal: off" in text
+    out = interactive.confirm_matching(ms, None, scripted("h", "y"), out=lambda *a: None)
+    assert smap.hum_removal is True and len(measured) == 1  # 'h' only switches: nothing measured again
+    lines = []
+    interactive.show_matching(out, None, out=lines.append)
+    assert any(l.startswith("  Buzz removal: ON") for l in lines)
+    interactive.confirm_matching(out, None, scripted("h", "y"), out=lambda *a: None)
+    lines = []
+    interactive.show_matching(out, None, out=lines.append)
+    assert any(l.startswith("  Buzz removal: off") for l in lines)
+
+
+def test_progress_shown_while_peaks_are_measured(monkeypatch):
+    from concertpub import gain
+    from concertpub.analyze import SourceMap
+    from concertpub.media import MediaFile
+
+    monkeypatch.setattr(gain, "peak_of", lambda audio, z0, dur, rate=None: -9.0)
+    smap = SourceMap([], [MediaFile("/m/r.wav", 400.0)], 0.0)
+    ms = [Match(100.0 * k, 100.0 * k + 90, None, Region(0, 1), offset=0.0, sources=smap) for k in range(3)]
+    first = []
+    interactive.show_matching(ms, None, out=first.append)
+    assert any("measuring the peaks of 3 piece(s) ..." in l for l in first) and any(l.startswith("done (") for l in first)
+    ms[1] = replace(ms[1], end=ms[1].end - 1.0)  # e.g. a lead-in or merge changed one cut
+    again = []
+    interactive.show_matching(ms, None, out=again.append)
+    assert any("measuring the peaks of 1 piece(s) ..." in l for l in again)
+
+
+def test_buzz_removal_line_under_the_gain(monkeypatch):
+    from concertpub import gain
+    from concertpub.analyze import SourceMap
+    from concertpub.media import MediaFile
+
+    monkeypatch.setattr(gain, "peak_of", lambda audio, z0, dur, rate=None: -9.0)
+    hum = {"mains_hz": 50.0, "harmonics": [{"hz": 50.0, "db": 23.0}, {"hz": 150.0, "db": 18.0}], "strongest_db": 23.0}
+    smap = SourceMap([], [MediaFile("/m/r.wav", 400.0)], 0.0, hum=hum, hum_removal=True)
+    lines = []
+    interactive.show_matching([Match(0.0, 90.0, None, Region(0, 1), offset=0.0, sources=smap)], None,
+                              out=lines.append)
+    i = next(i for i, l in enumerate(lines) if "Concert gain:" in l)
+    assert lines[i + 1].startswith("  Buzz removal: ON")
+    assert any("WARNING: a constant buzz" in l for l in lines[:i])

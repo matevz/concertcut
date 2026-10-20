@@ -7,11 +7,14 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
-import unicodedata
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import numpy as np
 
 from . import gain, media
 from .config import Config, Piece
@@ -23,9 +26,17 @@ def _layout(channels: int) -> str:
     return {1: "mono", 2: "stereo"}.get(channels, f"{channels}c")
 
 
-def _audio_inputs(config: Config, piece: Piece, first_index: int) -> tuple[list[str], str]:
-    """ffmpeg input args and a filter chain producing [aud] for the piece's recorder audio."""
+def _audio_inputs(config: Config, piece: Piece, first_index: int,
+                  prepared: Path | None = None) -> tuple[list[str], str]:
+    """ffmpeg input args and a filter chain producing [aud] for the piece's recorder audio.
+
+    ``prepared``: the piece's audio already decoded and cleaned (buzz removed) as raw float32
+    at the recording's own sample rate; used instead of the recorder files.
+    """
     a0 = config.audio[0]
+    if prepared is not None:
+        args = ["-f", "f32le", "-ar", str(a0.sample_rate), "-ac", str(max(1, a0.channels)), "-i", str(prepared)]
+        return args, "", f"[{first_index}:a]"
     sr, ch = a0.sample_rate, max(1, a0.channels)
     z0 = config.audio_time(piece, piece.start)
     args, labels, filt = [], [], []
@@ -82,19 +93,23 @@ def _metadata(config: Config, piece: Piece) -> list[str]:
     return out
 
 
-def flac_command(config: Config, piece: Piece, out: Path) -> list[str]:
+def _join(*parts: str) -> str:
+    return ";".join(p for p in parts if p)
+
+
+def flac_command(config: Config, piece: Piece, out: Path, prepared: Path | None = None) -> list[str]:
     # CD quality (44.1 kHz / 16-bit), or the recording's own quality if that is lower:
     # soxr resampling, triangular dither to 16 bits, maximum lossless compression
-    args, filt, cur = _audio_inputs(config, piece, 0)
+    args, filt, cur = _audio_inputs(config, piece, 0, prepared)
     convert = (f"aresample={config.flac_rate}:resampler=soxr:precision=28:osf=s16:"
                f"dither_method=triangular")
-    filt += ";" + _audio_post(config, piece, cur, config.gain_db, "[out]", convert)
+    filt = _join(filt, _audio_post(config, piece, cur, config.gain_db, "[out]", convert))
     return ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y", *args, "-filter_complex", filt,
             "-map", "[out]", "-c:a", "flac", "-compression_level", "12", "-sample_fmt", "s16",
             *_metadata(config, piece), str(out)]
 
 
-def mp4_command(config: Config, piece: Piece, out: Path) -> list[str]:
+def mp4_command(config: Config, piece: Piece, out: Path, prepared: Path | None = None) -> list[str]:
     s = config.settings
     v0 = next(f for f in config.video if f.video_index >= 0)
     fps = config.fps
@@ -117,11 +132,12 @@ def mp4_command(config: Config, piece: Piece, out: Path) -> list[str]:
         vout = "[vout]"
     else:
         vout = labels[0]
-    a_args, a_filt, cur = _audio_inputs(config, piece, len(labels))
+    a_args, a_filt, cur = _audio_inputs(config, piece, len(labels), prepared)
     g = config.gain_db
     if s.mp4_peak_dbfs is not None:
         g += s.mp4_peak_dbfs - s.peak_dbfs
-    filt.append(a_filt)
+    if a_filt:
+        filt.append(a_filt)
     # CD sample rate (or the recording's, if lower) like the FLAC; AAC needs no dither
     filt.append(_audio_post(config, piece, cur, g, "[aout]",
                             f"aresample={config.flac_rate}:resampler=soxr:precision=28"))
@@ -151,10 +167,13 @@ def _run(cmd: list[str], out: Path, threads: int | None = None) -> float:
 MANIFEST = ".concertpub-render.json"
 
 
-def _fingerprint(config: Config, cmd: list[str]) -> str:
+def _fingerprint(config: Config, cmd: list[str], piece: Piece | None = None) -> str:
     """Everything that defines an output: the ffmpeg command (sources, cut points, gain,
-    encoding settings, tags) and the size of every source file."""
+    encoding settings, tags), the size of every source file, and - when the audio was
+    prepared in Python (buzz removal) - the piece's cut and the buzz being removed."""
     h = hashlib.sha1(json.dumps(cmd[:-1]).encode())
+    if piece is not None and config.active_hum:
+        h.update(json.dumps([piece.start, piece.end, piece.audio_offset_ms, config.active_hum]).encode())
     for f in config.video + config.audio:
         h.update(f"{f.path}:{f.size}".encode())
     return h.hexdigest()
@@ -170,26 +189,33 @@ def render(config: Config, out_dir: str | Path | None = None, only: set[int] | N
     if video and not config.video:
         log.info("no camera files: MP4 export skipped")
         video = False
+    tmp = out_dir / ".concertpub-tmp"
+    prepared: dict[int, Path] = {}
+    if config.active_hum:  # buzz removal: each piece to render is cleaned once, for FLAC and MP4
+        prepared = {p.number: tmp / f"{p.number:02d}.f32" for p in pieces}
     if not dry_run:
         if config.settings.gain_db_auto or config.settings.gain_db is None:
+            # measured on the recording as it is (with a buzz, if any): quick, and removing
+            # the buzz only lowers the peaks, so the cleaned files cannot clip
             log.info("measuring the pieces' peaks for the concert gain")
             gain.update_gain(config)
         if config.path:
             config.save()
-    tasks: list[tuple[list[str], Path]] = []  # all FLAC files first, then the (slow) MP4 files
+    tasks: list[tuple[list[str], Path, Piece]] = []  # all FLAC files first, then the (slow) MP4 files
+
     if audio:
         for p in pieces:
             out = out_dir / "audio" / f"{p.basename}.flac"
-            tasks.append((flac_command(config, p, out), out))
+            tasks.append((flac_command(config, p, out, prepared.get(p.number)), out, p))
     if video:
         for p in pieces:
             out = out_dir / "video" / f"{p.basename}.mp4"
-            tasks.append((mp4_command(config, p, out), out))
+            tasks.append((mp4_command(config, p, out, prepared.get(p.number)), out, p))
     manifest_path = out_dir / MANIFEST
     manifest: dict[str, str] = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     todo = []
-    for cmd, out in tasks:
-        key, fp = str(out.relative_to(out_dir)), _fingerprint(config, cmd)
+    for cmd, out, p in tasks:
+        key, fp = str(out.relative_to(out_dir)), _fingerprint(config, cmd, p)
         if out.exists() and not force and manifest.get(key) == fp:
             log.info("up to date: %s", out.name)
             continue
@@ -200,9 +226,26 @@ def render(config: Config, out_dir: str | Path | None = None, only: set[int] | N
             log.info("%s: %s", "re-rendering" if not force else "overwriting",
                      out.name if manifest.get(key) else f"{out.name} (not made by concertpub)")
         out.parent.mkdir(parents=True, exist_ok=True)
-        todo.append((cmd, out, key, fp))
+        todo.append((cmd, out, key, fp, p))
+    if prepared and todo:
+        need = list({id(t[4]): t[4] for t in todo}.values())  # only pieces that are rendered now
+        tmp.mkdir(parents=True, exist_ok=True)
+        cpus = os.cpu_count() or 1
+        # a few pieces at a time (decoding one overlaps with filtering another), the rest of
+        # the CPU threads filter the blocks of each piece in parallel
+        at_once = max(1, min(len(need), cpus // 4))
+        threads = max(1, cpus // at_once)
+        log.info("removing the buzz from %d piece(s): %d at a time, %d thread(s) each",
+                 len(need), at_once, threads)
+
+        def prepare(p):
+            x, _ = gain.piece_audio(config, p, threads)  # buzz removed at the recording's own rate
+            x.astype(np.float32).tofile(prepared[p.number])
+
+        with ThreadPoolExecutor(max_workers=at_once) as ex:
+            list(ex.map(prepare, need))
     if not only:
-        current = {str(out.relative_to(out_dir)) for _, out in tasks}
+        current = {str(out.relative_to(out_dir)) for _, out, _ in tasks}
         for key in sorted(set(manifest) - current):
             if (out_dir / key).exists():
                 log.warning("no longer in the config (delete it if not needed): %s", out_dir / key)
@@ -221,7 +264,7 @@ def render(config: Config, out_dir: str | Path | None = None, only: set[int] | N
             threads = None
             log.info("rendering %d %s file(s): %d at a time, 1 thread each", len(phase), kind, parallel)
         with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futs = {ex.submit(_run, cmd, out, threads): (out, key, fp) for cmd, out, key, fp in phase}
+            futs = {ex.submit(_run, cmd, out, threads): (out, key, fp) for cmd, out, key, fp, _ in phase}
             for fut in as_completed(futs):
                 out, key, fp = futs[fut]
                 try:
@@ -232,6 +275,7 @@ def render(config: Config, out_dir: str | Path | None = None, only: set[int] | N
                 except RuntimeError as e:
                     log.error("%s", e)
                     errors.append(str(out))
+    shutil.rmtree(tmp, ignore_errors=True)
     if errors:
         raise RuntimeError(f"{len(errors)} export(s) failed: {', '.join(errors)}")
     return done

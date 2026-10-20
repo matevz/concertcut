@@ -7,10 +7,12 @@ import os
 import shlex
 import subprocess
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
-from . import programme as prog
+from . import noise, programme as prog
 from .analyze import BackToProgramme, Match, PreviewKdenlive, RereadMedia, RereadProgramme, concert_gain
 
 
@@ -174,9 +176,13 @@ def _span_text(spans: list[dict]) -> str:
 
 
 def show_matching(matches: list[Match], pr: prog.Programme | None, out=print) -> None:
-    stale = sum(1 for m in matches if m.sources and m._peak_key is None)
-    if stale:
-        out(f"\nmeasuring the peaks of {stale} piece(s)...")
+    stale = [m for m in matches if m.peak_stale]
+    if stale:  # can take a while (full-quality decoding): say so, and measure in parallel
+        out(f"\nmeasuring the peaks of {len(stale)} piece(s) ...")
+        t = time.monotonic()
+        with ThreadPoolExecutor(max_workers=max(1, min(len(stale), os.cpu_count() or 1))) as ex:
+            list(ex.map(lambda m: m.peak(), stale))
+        out(f"done ({time.monotonic() - t:.0f} s)")
     gain, loudest, by_user = concert_gain(matches)
     out("\nDetected pieces (positions in the source files):")
     out(f"  {'#':>2}  {'len':>5}  {'lead-in':>7}  {'peak':>9}  {'ends at':<10}  piece")
@@ -195,10 +201,21 @@ def show_matching(matches: list[Match], pr: prog.Programme | None, out=print) ->
         missing = [it for it in pr.items if it.number not in used]
         for it in missing:
             out(f"  not matched: [{it.number:2d}] {it.composer_or_folk} - {it.title}")
+    smap = next((m.sources for m in matches if m.sources), None)
+    buzz_line = None
+    if smap is not None and smap.hum:
+        out("")
+        out(f"  WARNING: a constant buzz was found in the recording: {noise.describe(smap.hum)}.")
+        buzz_line = ("  Buzz removal: ON - it is filtered out when rendering ('h' to turn it off)."
+                     if smap.hum_removal else "  Buzz removal: off - press 'h' to filter it out when rendering.")
+    if gain is None and buzz_line:
+        out(buzz_line)
     if gain is not None:
         k = matches.index(loudest) + 1 if loudest else None
         if by_user:
             out(f"\n  Concert gain: {gain:+.2f} dB (set by you; 'g auto' for automatic)")
+            if buzz_line:
+                out(buzz_line)
             clipping = [str(i) for i, m in enumerate(matches, 1)
                         if m.enabled and m.peak() is not None and m.peak() + gain > 0.0]
             if clipping:
@@ -209,6 +226,9 @@ def show_matching(matches: list[Match], pr: prog.Programme | None, out=print) ->
             target = loudest.sources.target_dbfs
             out(f"\n  Concert gain: {gain:+.2f} dB (automatic: the loudest piece, {k}*, peaks at "
                 f"{target:.1f} dBFS)")
+            if buzz_line:
+                out(buzz_line)
+    out("")  # an empty line before the question
 
 
 def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=input,
@@ -217,7 +237,8 @@ def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=i
     while True:
         show_matching(matches, pr, out)
         a = _ask("Is this matching correct? [Y]es / [m]erge segments / [d]rop segment / "
-                 "[a]ssign pieces / [l]ead-in / [g]ain / [k]denlive project / [b]ack to the programme / "
+                 "[a]ssign pieces / [l]ead-in / [g]ain / [h]um/buzz removal / [k]denlive project / "
+                 "[b]ack to the programme / "
                  "[r]e-read the video and audio files / [q]uit: ", input_fn).lower()
         if a in ("", "y", "yes"):
             return matches
@@ -247,6 +268,16 @@ def confirm_matching(matches: list[Match], pr: prog.Programme | None, input_fn=i
                     out("  no such segment")
                     continue
                 del matches[i - 1]
+            elif a in ("h", "hum", "buzz"):
+                smaps = {id(m.sources): m.sources for m in matches if m.sources}
+                hum = next((sm.hum for sm in smaps.values() if sm.hum), None)
+                if not hum:
+                    out("  no constant buzz was found in this recording")
+                    continue
+                state = not any(sm.hum_removal for sm in smaps.values())
+                for sm in smaps.values():
+                    sm.hum_removal = state
+                out(f"  buzz removal {'on' if state else 'off'}")
             elif a.startswith("g"):
                 rest = a[1:].strip() or _ask("Concert gain in dB (e.g. 8 or 6.5), or 'auto': ", input_fn)
                 smaps = {id(m.sources): m.sources for m in matches if m.sources}
