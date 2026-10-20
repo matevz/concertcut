@@ -45,10 +45,10 @@ def test_pieces_split_at_applause_and_speech_only():
     starts = [r.start for r in regions]
     ends = [r.end for r in regions]
     # piece 1 starts right after the speech at 50 s (no quiet to keep), ends where applause starts
-    assert abs(starts[0] - 50.3) < 0.15 and abs(ends[0] - 170.0) < 0.2
+    assert abs(starts[0] - 50.3) < 0.15 and abs(ends[0] - 169.5) < 0.2  # applause at 170 s, minus the 0.5 s margin
     # piece 2 spans the 5 s rest: 178 .. 313
-    assert abs(starts[1] - 179.5) < 0.15 and abs(ends[1] - 313.0) < 0.2
-    assert abs(starts[2] - 349.3) < 0.15 and abs(ends[2] - 439.0) < 0.2
+    assert abs(starts[1] - 179.5) < 0.15 and abs(ends[1] - 312.5) < 0.2
+    assert abs(starts[2] - 349.3) < 0.15 and abs(ends[2] - 438.5) < 0.2
     assert [r.end_reason for r in regions] == ["applause", "applause", "applause"]
     assert not warnings
 
@@ -57,7 +57,7 @@ def test_split_at_silence_when_programme_needs_more_pieces():
     scores, energy, hf = build(CONCERT)
     regions, warnings, _ = segment.segment(scores, energy, hf, FPS, len(energy) / FPS, expected=4)
     assert len(regions) == 4
-    assert abs(regions[1].end - 242.5) < 0.3 and abs(regions[2].start - 242.7) < 0.2
+    assert abs(regions[1].end - 242.0) < 0.3 and abs(regions[2].start - 242.0) < 0.2  # lead-in up to the previous end
     assert any("split" in w for w in warnings)
 
 
@@ -105,7 +105,7 @@ def test_pitch_cue_separates_pieces_without_applause():
     assert len(regions) == 2, warnings
     # 3 s of quiet hall kept before the first note at 91 s
     assert abs(regions[1].start - 88.0) < 0.1 and "pitch cue" in regions[1].start_reason
-    assert abs(regions[0].end - 74.5) < 0.1 and regions[0].end_reason == "next piece"  # just before the cue
+    assert abs(regions[0].end - 74.0) < 0.1 and regions[0].end_reason == "next piece"  # just before the cue
 
 
 def test_encore_after_ovation():
@@ -131,7 +131,7 @@ def test_loud_chord_near_end_is_not_a_cue():
         sc.append(s), en.append(e), hf.append(h)
     scores, energy, hf = np.concatenate(sc), np.concatenate(en), np.concatenate(hf)
     regions, warnings, _ = segment.segment(scores, energy, hf, FPS, len(energy) / FPS, expected=1)
-    assert len(regions) == 1 and regions[0].end > 92.5, (regions, warnings)
+    assert len(regions) == 1 and regions[0].end > 92.0, (regions, warnings)
 
 
 def test_lead_in_shorter_when_pitch_still_rings():
@@ -175,4 +175,4 @@ def test_end_before_first_isolated_claps():
         energy[i:i + 4] = -35.0
     regions, _, _ = segment.segment(scores, energy, hf, FPS, len(energy) / FPS)
     assert regions[0].end_reason == "applause"
-    assert 71.8 < regions[0].end < 72.0, regions[0].end
+    assert 71.3 < regions[0].end < 71.5, regions[0].end  # first clap at 72.0 s, minus 0.5 s

@@ -50,6 +50,7 @@ class SegmentParams:
     clap_db: float = 12.0  # above the hall's quiet level
     clap_rise_db: float = 8.0  # within 30 ms
     clap_gap_s: float = 1.0  # claps closer than this belong to the same applause
+    end_margin_s: float = 0.5  # every piece ends this much before the detected end
 
 
 @dataclass
@@ -432,6 +433,7 @@ def refine(regions: list[tuple[int, int]], lab: np.ndarray, music: np.ndarray,
             r.end_reason = "silence"
         if end >= total:
             end, r.end_reason = total, "end of recording"
+        end -= p.end_margin_s  # the detector recognises applause a little late: stay clear of it
         r.end = max(r.start + 1.0, end)
         sep_t = st
         if out and r.start < out[-1].end:
